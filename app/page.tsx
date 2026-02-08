@@ -20,22 +20,30 @@ type Mode = "stuck" | "doubt" | "tired";
 
 // --- App interaction modes ---
 type AppMode = "lite" | "guide" | "push";
+// NEW LABELS according to canon
 const appModeLabels: Record<AppMode, string> = {
-  lite: "Поддержка",
-  guide: "Держи курс",
-  push: "Подгоняй",
+  lite: "Спокойнее",
+  guide: "Яснее",
+  push: "Строже",
 };
 
 const appModeDescriptions: Record<AppMode, string> = {
-  lite: "Тёплый друг. Просто рядом.",
-  guide: "Рамка и критерий для твоей ситуации.",
-  push: "Ясно и коротко. Можно на потом.",
+  lite: "Я помогу снизить шум и не сделать хуже.",
+  guide: "Я помогу разобраться и выбрать следующий шаг.",
+  push:
+    "Я буду говорить прямо.\nПоказывать, где ты врёшь себе.\nИ что делать дальше без самообмана.",
+};
+
+const appModeFineDescription: Record<AppMode, string | null> = {
+  lite: null,
+  guide: "Без давления. По сути.",
+  push: "Этот режим не щадит. Только если ты готов.",
 };
 
 const appModePrices: Record<AppMode, string | null> = {
   lite: null,
-  guide: "$3 / месяц",
-  push: "$5 / месяц",
+  guide: "$3",
+  push: "$5",
 };
 
 const appModeIcons: Record<AppMode, string> = {
@@ -44,6 +52,7 @@ const appModeIcons: Record<AppMode, string> = {
   push: "🔥",
 };
 
+// Kept warm line but not used on onboarding per new canon
 const appModeWarmLine: Record<AppMode, string> = {
   lite: "Я тут. Можно коротко, как есть.",
   guide: "Опиши, что главное сейчас.",
@@ -398,19 +407,14 @@ async function analyzeDecision(
 // --- Main ---
 export default function Home() {
   // Оплата и пробный доступ
-  // paidMode ("guide" | "push" | null): текущий платный режим, если пользователь выбрал/подтвердил (включая платный период или после него)
-  // trialState: объект с датой начала недели для платных режимов, либо null если не пробовал
-  // trialOver: true если недельный тест для текущего режима закончился
-  // trialActive: true если тест идёт
-
-  // --- Local UI state
   const [appMode, setAppMode] = useState<AppMode | null>(null);
   const [showModeScreen, setShowModeScreen] = useState(false);
   const [showAgreement, setShowAgreement] = useState<null | "guide" | "push">(null);
   const [showTrialOverPrompt, setShowTrialOverPrompt] = useState<null | "guide" | "push">(null);
+  const [showUpgrade, setShowUpgrade] = useState<null | "guide" | "push">(null); // Upgrade modal state
 
   // Определяем состояние пробной недели
-  const [trialState, setTrialState_] = useState<PaidTrialState | null>(null); // текущий trial
+  const [trialState, setTrialState_] = useState<PaidTrialState | null>(null);
   useEffect(() => {
     setTrialState_(getTrialState());
   }, [showModeScreen]);
@@ -438,7 +442,6 @@ export default function Home() {
   }
 
   function finishTrial(mode: "guide" | "push") {
-    // завершить trial
     setTrialState_((curr) =>
       curr && curr.mode === mode
         ? { ...curr, finished: true }
@@ -456,7 +459,6 @@ export default function Home() {
     setAppMode(mode);
     setShowTrialOverPrompt(null);
     setShowModeScreen(false);
-    // Trial завершён, continued true
     setTrialState_((curr) =>
       curr && curr.mode === mode
         ? { ...curr, continued: true, finished: true }
@@ -468,13 +470,12 @@ export default function Home() {
     }
   }
 
-  // Вычисляем, если пользователь находится в платном режиме, действует ли у него trial
+  // Trial/paid checks
   function isTrialActive(mode: "guide" | "push") {
     if (!trialState || trialState.mode !== mode) return false;
     if (trialState.finished) return false;
     const start = new Date(trialState.started);
     const now = new Date();
-    // trial длится 7 полных суток
     if ((now.getTime() - start.getTime()) / (1000 * 60 * 60 * 24) < 7) {
       return true;
     }
@@ -493,14 +494,10 @@ export default function Home() {
   // --- Multi-mode: Current "action" depends on appMode ---
   function initialActionKey(am: AppMode | null) {
     switch (am) {
-      case "lite":
-        return "stuck";
-      case "guide":
-        return "blocker";
-      case "push":
-        return "move";
-      default:
-        return "stuck";
+      case "lite":   return "stuck";
+      case "guide":  return "blocker";
+      case "push":   return "move";
+      default:       return "stuck";
     }
   }
   const [selectedAction, setSelectedAction] = useState<ActionKey>(initialActionKey(appMode));
@@ -513,7 +510,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
 
-  const [nextStepUser, setNextStepUser] = useState(""); // stuck/minStep style
+  const [nextStepUser, setNextStepUser] = useState("");
   const [confidence, setConfidence] = useState<number>(0);
   const [falsifier, setFalsifier] = useState("");
   const [minStep, setMinStep] = useState("");
@@ -524,19 +521,17 @@ export default function Home() {
   const [tab, setTab] = useState<"today" | "journal">("today");
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // --- ACTUAL MODE LOGIC ON SELECT ---
+  // --- ONBOARDING/STARTUP LOGIC ---
   useEffect(() => {
     const m = getStoredAppMode();
     setTrialState_(getTrialState());
     setShowAgreement(null);
     setShowTrialOverPrompt(null);
 
-    // Если начался платный режим (guide/push)
+    // guide/push: trial/upgrade logic
     if (m === "guide" || m === "push") {
-      // В режиме guide/push может быть активен trial, может быть завершён
       const trialCur = getTrialState();
       if (trialCur && trialCur.mode === m && trialCur.finished && !isPaidContinued(m)) {
-        // test is over & не выбрал платить — покажем повторно триггер выбора
         setShowTrialOverPrompt(m);
         setAppMode("lite");
         setStoredAppMode("lite");
@@ -545,8 +540,7 @@ export default function Home() {
       } else if (trialCur && trialCur.mode === m && trialCur.continued) {
         setAppMode(m);
       } else if (!trialCur) {
-        // нет trial — покажем договор
-        setAppMode("lite"); // только после явного согласия
+        setAppMode("lite");
         setShowAgreement(m);
       } else {
         setAppMode("lite");
@@ -694,8 +688,8 @@ export default function Home() {
     const modeActionStr = ((): string => {
       if (e.appMode && e.actionKey) {
         return (
-          `${appModeLabels[e.appMode]} · ` +
-          actionLabelFor(e.appMode, e.actionKey)
+          `${e.appMode ? appModeLabels[e.appMode] : ""} · ` +
+          actionLabelFor(e.appMode!, e.actionKey)
         );
       }
       if (e.mode) return e.mode;
@@ -748,8 +742,8 @@ export default function Home() {
   }
 
   // --- ЭКРАН ДОГОВОРА (просмотра тестового доступа) ---
+  // (Not shown with new upgrade logic, but kept for trial)
   function renderAgreementScreen(mode: "guide" | "push") {
-    // agreement для "Держи курс" и "Подгоняй"
     const price = appModePrices[mode];
     return (
       <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
@@ -792,7 +786,6 @@ export default function Home() {
 
   // --- ПРОМПТ ПО ОКОНЧАНИИ НЕДЕЛЬНОГО ТЕСТА ---
   function renderTrialOverPrompt(mode: "guide" | "push") {
-    // trial закончился — только при заходе в режим. Тон спокойный, две равнозначные опции
     const price = appModePrices[mode];
     return (
       <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
@@ -802,7 +795,7 @@ export default function Home() {
             <h1 className="text-xl font-semibold mb-1 mt-2">{appModeLabels[mode]}</h1>
             <span className="text-base text-gray-700 mt-2 mb-1">
               Мы договаривались на неделю.<br />
-              Хочешь продолжить — или вернёмся к Поддержке?
+              Хочешь продолжить — или вернёмся к Спокойнее?
             </span>
           </div>
           <div className="flex flex-col gap-2 w-full">
@@ -828,7 +821,7 @@ export default function Home() {
               type="button"
               autoFocus
             >
-              Вернуться к Поддержке
+              Вернуться к Спокойнее
             </button>
           </div>
         </div>
@@ -836,85 +829,221 @@ export default function Home() {
     );
   }
 
-  // --- ЭКРАН ВЫБОРА РЕЖИМА ---
-  function renderModeScreen() {
+  // --- ЭКРАН АПГРЕЙДА ---
+  function renderUpgradeScreen(current?: "guide" | "push" | null) {
+    // Shows all three modes. Highlight if current.
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
-        <div className="w-full max-w-md bg-white rounded-xl shadow-md p-6 flex flex-col gap-8 items-center">
-          <div className="w-full flex flex-col items-center text-center gap-2 mb-2">
-            <h1 className="text-2xl font-bold mb-1 mt-2">Как мне быть с тобой сейчас?</h1>
-            <span className="text-sm text-gray-500 mt-0.5 mb-2">
-              Это можно поменять в любой момент.
-            </span>
+      <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4 z-50 absolute top-0 left-0 w-full h-full">
+        <div className="w-full max-w-lg bg-white rounded-xl shadow-md p-6 flex flex-col gap-8 items-center">
+          <div className="w-full flex flex-col items-center text-center gap-1 mb-2">
+            <h1 className="text-2xl font-bold mb-1 mt-2">Переход на другой режим</h1>
           </div>
-          <div className="flex flex-col gap-4 w-full">
-            {(Object.keys(appModeLabels) as AppMode[]).map((mode) => (
-              <button
-                key={mode}
-                className="w-full flex flex-row gap-3 items-center px-4 py-4 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 focus:outline-none transition group"
-                onClick={() => {
-                  // Если нажат платный режим — показываем договор, кроме случаев, когда test-режим уже действует (или продолжил)
-                  if ((mode === "guide" || mode === "push")) {
-                    // если user уже прошёл trial и не продолжил — предложим снова оплачивать только при желании
-                    const trial = getTrialState();
-                    if (trial && trial.mode === mode && !trial.continued && isTrialOver(mode)) {
-                      setShowTrialOverPrompt(mode);
-                    } else if (!trial || trial.mode !== mode) {
-                      setShowAgreement(mode);
-                    } else if (trial && trial.mode === mode && isTrialActive(mode)) {
-                      setStoredAppMode(mode);
-                      setAppMode(mode);
-                      setShowModeScreen(false);
-                      setShowAgreement(null);
-                    } else if (trial && trial.mode === mode && trial.continued) {
-                      setStoredAppMode(mode);
-                      setAppMode(mode);
-                      setShowModeScreen(false);
-                      setShowAgreement(null);
-                    } else {
-                      setShowAgreement(mode);
-                    }
-                  } else {
-                    setStoredAppMode(mode);
-                    setAppMode(mode);
+          <div className="flex flex-col sm:flex-row gap-4 w-full">
+            {/* Спокойнее/FREE */}
+            <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
+              <div className="p-4 flex flex-col items-center gap-1">
+                <span className="text-2xl">{appModeIcons["lite"]}</span>
+                <span className="text-lg font-semibold mt-1">{appModeLabels["lite"]}</span>
+                <span className="text-gray-600 text-sm mt-2 whitespace-pre-line text-center">{appModeDescriptions["lite"]}</span>
+                {appModeFineDescription["lite"] && (
+                  <span className="text-gray-400 text-xs mt-2">{appModeFineDescription["lite"]}</span>
+                )}
+              </div>
+              <div className="px-4 pb-4 mt-2">
+                <button
+                  className="w-full px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
+                  onClick={() => {
+                    setStoredAppMode("lite");
+                    setAppMode("lite");
+                    setShowUpgrade(null);
                     setShowModeScreen(false);
-                    setShowAgreement(null);
-                  }
-                }}
-                type="button"
-              >
-                <span className="text-2xl mr-1">{appModeIcons[mode]}</span>
-                <span className="flex flex-col items-start">
-                  <span className="text-base font-semibold text-gray-900">
-                    {appModeLabels[mode]}
-                  </span>
-                  <span className="text-gray-500 text-xs mt-0.5">
-                    {appModeDescriptions[mode]}
-                  </span>
-                  {/* Отображать цену только для платных */}
-                  {appModePrices[mode] && (
-                    <span className="text-amber-600 text-xs mt-1 ml-px">{appModePrices[mode]}</span>
-                  )}
-                  {/* Маркеры теста */}
-                  {(mode === "guide" || mode === "push") && isTrialActive(mode) && (
-                    <span className="inline-block text-emerald-600 text-xs mt-1 ml-px">
-                        Неделя бесплатно
-                    </span>
-                  )}
-                  {(mode === "guide" || mode === "push") && isPaidContinued(mode) && (
-                    <span className="inline-block text-gray-400 text-xs mt-1 ml-px">
-                      Активен
-                    </span>
-                  )}
-                </span>
-              </button>
-            ))}
+                  }}
+                  type="button"
+                >Выбрать</button>
+              </div>
+              <div className="text-amber-600 text-xs text-center mb-2">Бесплатно</div>
+            </div>
+            {/* Яснее */}
+            <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
+              <div className="p-4 flex flex-col items-center gap-1">
+                <span className="text-2xl">{appModeIcons["guide"]}</span>
+                <span className="text-lg font-semibold mt-1">{appModeLabels["guide"]}</span>
+                <span className="text-gray-600 text-sm mt-2 whitespace-pre-line text-center">{appModeDescriptions["guide"]}</span>
+                {appModeFineDescription["guide"] && (
+                  <span className="text-gray-400 text-xs mt-2">{appModeFineDescription["guide"]}</span>
+                )}
+              </div>
+              <div className="px-4 pb-4 mt-2">
+                <button
+                  className="w-full px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
+                  onClick={() => {
+                    // Here, should check for trial/paid. For upgrade, just hide modal and trigger agreement if allowed
+                    setShowUpgrade(null);
+                    setShowAgreement("guide");
+                    // setAppMode("guide");
+                    // setStoredAppMode("guide");
+                  }}
+                  type="button"
+                >Выбрать этот режим</button>
+              </div>
+              <div className="text-amber-600 text-xs text-center mb-2">{appModePrices["guide"]}/мес</div>
+            </div>
+            {/* Строже */}
+            <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
+              <div className="p-4 flex flex-col items-center gap-1">
+                <span className="text-2xl">{appModeIcons["push"]}</span>
+                <span className="text-lg font-semibold mt-1">{appModeLabels["push"]}</span>
+                <span className="text-gray-600 text-sm mt-2 whitespace-pre-line text-center">{appModeDescriptions["push"]}</span>
+                {appModeFineDescription["push"] && (
+                  <span className="text-gray-400 text-xs mt-2">{appModeFineDescription["push"]}</span>
+                )}
+              </div>
+              <div className="px-4 pb-4 mt-2">
+                <button
+                  className="w-full px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
+                  onClick={() => {
+                    setShowUpgrade(null);
+                    setShowAgreement("push");
+                  }}
+                  type="button"
+                >Мне нужен честный разговор</button>
+              </div>
+              <div className="text-amber-600 text-xs text-center mb-2">{appModePrices["push"]}/мес</div>
+            </div>
           </div>
+          <div className="mt-2 text-gray-400 text-xs text-center">
+              Thinkclear не принимает решений за тебя. Он лишь помогает увидеть следующий шаг.
+          </div>
+          <button
+            className="mt-2 underline text-xs text-gray-500 hover:text-gray-900"
+            onClick={() => setShowUpgrade(null)}
+            type="button"
+          >
+            Отмена
+          </button>
         </div>
       </main>
     );
   }
 
+  // --- ЭКРАН ВЫБОРА РЕЖИМА (ONBOARDING) ---
+  function renderModeScreen() {
+    return (
+      <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+        <div className="w-full max-w-xl bg-white rounded-xl shadow-md p-6 flex flex-col gap-10 items-center">
+          <div className="w-full flex flex-col items-center text-center gap-2 mb-2">
+            {/* Канонич. заголовок/подзаголовок */}
+            <h1 className="text-2xl font-bold mb-1 mt-2">Какой формат тебе сейчас нужен?</h1>
+            <span className="text-sm text-gray-500 mt-0.5 mb-2">
+              Режим можно поменять в любой момент.
+            </span>
+          </div>
+          <div className="flex flex-col gap-4 w-full">
+            {/* Карточки трех режимов */}
+            {/* Спокойнее */}
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <div className="w-full flex flex-col items-center justify-between md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
+                  <div className="flex flex-col items-center text-center flex-grow">
+                    <span className="text-2xl">{appModeIcons["lite"]}</span>
+                    <span className="text-lg font-semibold mt-1">{appModeLabels["lite"]}</span>
+                    <span className="text-gray-600 text-sm mt-2 whitespace-pre-line">{appModeDescriptions["lite"]}</span>
+                  </div>
+                  <div className="mt-3">
+                    <button
+                      className="px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
+                      onClick={() => {
+                        setStoredAppMode("lite");
+                        setAppMode("lite");
+                        setShowModeScreen(false);
+                        setShowUpgrade(null);
+                        setShowAgreement(null);
+                      }}
+                      type="button"
+                    >
+                      Выбрать
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* Яснее */}
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <div className="w-full flex flex-col items-center md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
+                  <div className="flex flex-col items-center text-center flex-grow">
+                    <span className="text-2xl">{appModeIcons["guide"]}</span>
+                    <span className="text-lg font-semibold mt-1">{appModeLabels["guide"]}</span>
+                    <span className="text-gray-600 text-sm mt-2 whitespace-pre-line">{appModeDescriptions["guide"]}</span>
+                    <span className="text-gray-400 text-xs mt-2">{appModeFineDescription["guide"]}</span>
+                  </div>
+                  <div className="mt-3 flex flex-col items-center">
+                    <button
+                      className="px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
+                      onClick={() => {
+                        // Если нет trial/оплаты — апгрейд
+                        const trial = getTrialState();
+                        if (!trial || trial.mode !== "guide" || (!isTrialActive("guide") && !isPaidContinued("guide"))) {
+                          setShowUpgrade("guide");
+                        } else {
+                          setStoredAppMode("guide");
+                          setAppMode("guide");
+                          setShowModeScreen(false);
+                          setShowAgreement(null);
+                        }
+                      }}
+                      type="button"
+                    >
+                      Выбрать
+                    </button>
+                    <span className="text-amber-600 text-xs mt-1 ml-px">{appModePrices["guide"]}/мес</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* Строже */}
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <div className="w-full flex flex-col items-center md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
+                  <div className="flex flex-col items-center text-center flex-grow">
+                    <span className="text-2xl">{appModeIcons["push"]}</span>
+                    <span className="text-lg font-semibold mt-1">{appModeLabels["push"]}</span>
+                    <span className="text-gray-600 text-sm mt-2 whitespace-pre-line">{appModeDescriptions["push"]}</span>
+                    <span className="text-gray-400 text-xs mt-2">{appModeFineDescription["push"]}</span>
+                  </div>
+                  <div className="mt-3 flex flex-col items-center">
+                    <button
+                      className="px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
+                      onClick={() => {
+                        const trial = getTrialState();
+                        if (!trial || trial.mode !== "push" || (!isTrialActive("push") && !isPaidContinued("push"))) {
+                          setShowUpgrade("push");
+                        } else {
+                          setStoredAppMode("push");
+                          setAppMode("push");
+                          setShowModeScreen(false);
+                          setShowAgreement(null);
+                        }
+                      }}
+                      type="button"
+                    >
+                      Мне нужен честный разговор
+                    </button>
+                    <span className="text-amber-600 text-xs mt-1 ml-px">{appModePrices["push"]}/мес</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {showUpgrade && renderUpgradeScreen(showUpgrade)}
+      </main>
+    );
+  }
+
+  if (showUpgrade) {
+    return renderUpgradeScreen(showUpgrade);
+  }
   if (showAgreement === "guide" || showAgreement === "push") {
     return renderAgreementScreen(showAgreement);
   }
@@ -929,10 +1058,10 @@ export default function Home() {
   function AppModeIndicator() {
     let ui = appMode ? appModeLabels[appMode] : null;
     let note: string | null = null;
-    if ((appMode === "guide" || appMode === "push") && isTrialActive(appMode)) {
+    if (appMode && (appMode === "guide" || appMode === "push") && isTrialActive(appMode)) {
       note = "Неделя бесплатно";
-    } else if ((appMode === "guide" || appMode === "push") && isPaidContinued(appMode)) {
-      note = appModePrices[appMode] ? appModePrices[appMode]! : null;
+    } else if (appMode && (appMode === "guide" || appMode === "push") && isPaidContinued(appMode)) {
+      note = appModePrices[appMode] ? appModePrices[appMode]! + "/мес" : null;
     }
     return (
       <div className="absolute right-0 top-0 mt-4 mr-4 z-20 flex items-center gap-2">
@@ -954,7 +1083,8 @@ export default function Home() {
     );
   }
 
-
+  // --- ПЕРВЫЙ ЭКРАН/ОНБОРДИНГ ВОПРОС ---
+  // Заменено на канон: "Давай посмотрим, где ты сейчас." + "Какой следующий шаг без самообмана?"
   return (
     <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4 relative">
       <AppModeIndicator />
@@ -991,19 +1121,23 @@ export default function Home() {
 
         {tab === "today" && (
           <div>
-            <h1 className="text-2xl font-bold mb-2">Thinkclear</h1>
-            <p className="text-gray-600 mb-6">
-              Здесь можно выдохнуть и написать пару строк.
-            </p>
-
-            {/* Warm line depends on mode */}
-            <div className="mb-3 mt-2">
-              <div className="text-center text-[15px] text-teal-600 font-medium">{appModeWarmLine[appMode]}</div>
+            {/* CANON ONBOARDING: */}
+            <div className="mb-2 mt-2">
+              <h1 className="text-2xl font-bold mb-1 text-center">Давай посмотрим, где ты сейчас.</h1>
+              <p className="text-center text-base font-medium text-gray-700 mb-6">
+                Какой следующий шаг без самообмана?
+              </p>
+            </div>
+            {/* Warm line depends on mode (optional, can keep, but after onboarding question) */}
+            <div className="mb-3">
+              <div className="text-center text-[15px] text-teal-600 font-medium">
+                {appMode && appModeWarmLine[appMode]}
+              </div>
             </div>
 
             {/* Quick action + segmented controls */}
             <div className="flex flex-row gap-2 mb-4 select-none">
-              {appModeActions[appMode].map((def) => (
+              {(appMode && appModeActions[appMode] ? appModeActions[appMode] : []).map((def) => (
                 <button
                   key={def.key}
                   type="button"
@@ -1029,7 +1163,9 @@ export default function Home() {
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={appModePrompt[appMode][selectedAction] || ""}
+              placeholder={
+                ((appMode && appModePrompt[appMode]) ? appModePrompt[appMode][selectedAction] : "") || ""
+              }
               className="w-full min-h-[140px] p-3 rounded-lg border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none resize-y mb-4"
               disabled={loading}
             />
@@ -1281,7 +1417,7 @@ export default function Home() {
                       <span className="text-xs text-gray-400">{dateLocalString(e.createdAt)}</span>
                       <span className="inline-block text-xs text-gray-500 font-medium">{e.lens}</span>
                       {e.appMode && e.actionKey && (
-                        <Badge label={`${appModeLabels[e.appMode]} · ${actionLabelFor(e.appMode, e.actionKey)}`} type="mode" />
+                        <Badge label={`${e.appMode ? appModeLabels[e.appMode] : ""} · ${actionLabelFor(e.appMode, e.actionKey)}`} type="mode" />
                       )}
                       {!e.appMode && e.mode && (
                         <Badge label={e.mode} type="mode" />
