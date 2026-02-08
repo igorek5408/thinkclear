@@ -1,5 +1,7 @@
 "use client";
 
+// Fix: appMode as AppMode | null => index safely throughout the file
+
 import { useState, useEffect, useRef } from "react";
 
 // --- Types ---
