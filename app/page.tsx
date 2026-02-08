@@ -927,7 +927,7 @@ export default function Home() {
 
   // --- UI ---
   function AppModeIndicator() {
-    let ui = appModeLabels[appMode];
+    let ui = appMode ? appModeLabels[appMode] : null;
     let note: string | null = null;
     if ((appMode === "guide" || appMode === "push") && isTrialActive(appMode)) {
       note = "Неделя бесплатно";
