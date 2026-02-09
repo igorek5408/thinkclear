@@ -1,18 +1,8 @@
 "use client";
 
-// Fix: appMode as AppMode | null => index safely throughout the file
-
 import { useState, useEffect, useRef } from "react";
 
 // --- Types ---
-type AnalysisResult = {
-  essence: string;
-  assumptions: string;
-  risks: string;
-  strategies: string[];
-  nextStep: string;
-};
-
 type Aligns = "Да" | "Скорее да" | "Скорее нет" | "Нет" | null;
 
 // Mode state (legacy): Stuck, Doubt, Tired
@@ -46,13 +36,13 @@ const appModePrices: Record<AppMode, string | null> = {
   push: "$5",
 };
 
+// Иконки режимов + ☀️ всегда для lite
 const appModeIcons: Record<AppMode, string> = {
-  lite: "🫂",
+  lite: "☀️",
   guide: "🧭",
   push: "🔥",
 };
 
-// Kept warm line but not used on onboarding per new canon
 const appModeWarmLine: Record<AppMode, string> = {
   lite: "Я тут. Можно коротко, как есть.",
   guide: "Опиши, что главное сейчас.",
@@ -185,23 +175,23 @@ const actionLabelFor: (mode: AppMode, key: ActionKey) => string = (mode, key) =>
   return found ? found.label : key;
 };
 
+// === Тип ответа API (новый!) ===
+type ApiResponse =
+  | { kind: "question"; text: string }
+  | { kind: "answer"; blocks: { title: string; text: string }[]; nextStep?: string };
+
 type Entry = {
   id: string;
   createdAt: string;
   inputText: string;
   lens: string;
-  output: {
-    essence: string;
-    assumptions: string;
-    risks: string;
-    strategies: string[];
-    nextStep: string;
-  };
+  output: ApiResponse;
   aligns: Aligns;
   done: boolean | null;
   appMode?: AppMode;
   actionKey?: ActionKey;
   mode?: Mode;
+  // Оставляем поля для обратной совместимости с дневником:
   nextStepUser?: string;
   confidence?: number;
   falsifier?: string;
@@ -246,6 +236,7 @@ function safeParseEntries(): Entry[] {
     if (!Array.isArray(arr)) return [];
     return arr
       .map((x) => {
+        // Backward compatibility with old entries
         if (
           typeof x === "object" &&
           x &&
@@ -254,13 +245,35 @@ function safeParseEntries(): Entry[] {
           typeof x.inputText === "string" &&
           typeof x.lens === "string" &&
           typeof x.output === "object" &&
-          x.output &&
-          typeof x.output.essence === "string" &&
-          typeof x.output.assumptions === "string" &&
-          typeof x.output.risks === "string" &&
-          Array.isArray(x.output.strategies) &&
-          typeof x.output.nextStep === "string"
+          x.output
         ) {
+          let output: ApiResponse;
+          if ("kind" in x.output) {
+            output = x.output;
+          } else if (
+            // old shape {essence,...}
+            typeof x.output.essence === "string" &&
+            typeof x.output.assumptions === "string" &&
+            typeof x.output.risks === "string" &&
+            Array.isArray(x.output.strategies) &&
+            typeof x.output.nextStep === "string"
+          ) {
+            // legacy entry, convert
+            let blocks: { title: string; text: string }[] = [];
+            if (x.output.essence)
+              blocks.push({ title: "Суть", text: x.output.essence });
+            if (x.output.assumptions)
+              blocks.push({ title: "Как это выглядит", text: x.output.assumptions });
+            if (x.output.risks)
+              blocks.push({ title: "Что если так оставить", text: x.output.risks });
+            if (x.output.strategies?.length)
+              blocks.push({ title: "Можно так", text: x.output.strategies.join("\n") });
+            let nextStep = x.output.nextStep ? x.output.nextStep : undefined;
+            output = { kind: "answer", blocks, nextStep };
+          } else {
+            // fallback
+            output = { kind: "answer", blocks: [], nextStep: undefined };
+          }
           const m =
             typeof x.appMode === "string" && ["lite", "guide", "push"].includes(x.appMode)
               ? (x.appMode as AppMode)
@@ -302,6 +315,7 @@ function safeParseEntries(): Entry[] {
                 ? x.aligns
                 : null,
             done: typeof x.done === "boolean" ? x.done : null,
+            output: output,
           } as Entry;
         }
         return null;
@@ -377,15 +391,21 @@ function getStats(entries: Entry[]) {
   return { today: todayCount, week: daySet.size };
 }
 
+// Изменяемый analyzeDecision с previousKind
 async function analyzeDecision(
   input: string,
   appMode: AppMode,
-  actionKey: ActionKey
-): Promise<AnalysisResult> {
+  actionKey: ActionKey,
+  previousKind: "question" | "answer" | null
+): Promise<ApiResponse> {
+  const dataForBody: any = { input, appMode, actionKey };
+  if (previousKind !== null) {
+    dataForBody.previousKind = previousKind;
+  }
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input, appMode, actionKey }),
+    body: JSON.stringify(dataForBody),
   });
 
   if (!res.ok) {
@@ -395,13 +415,20 @@ async function analyzeDecision(
 
   const data = await res.json();
 
-  return {
-    essence: data.essence ?? "",
-    assumptions: data.assumptions ?? "",
-    risks: data.risks ?? "",
-    strategies: Array.isArray(data.strategies) ? data.strategies : [],
-    nextStep: data.nextStep ?? "",
-  };
+  if (data.kind === "question") {
+    return { kind: "question", text: data.text ?? "" };
+  }
+  if (data.kind === "answer" && Array.isArray(data.blocks)) {
+    return {
+      kind: "answer",
+      blocks: data.blocks.map((block: any) => ({
+        title: block.title ?? "",
+        text: block.text ?? "",
+      })),
+      nextStep: data.nextStep ?? undefined,
+    };
+  }
+  throw new Error("Неверный формат ответа от сервера.");
 }
 
 // --- Main ---
@@ -508,20 +535,24 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
 
+  // Новые состояния для сценария "question/answer"
+  const [lastApiResponse, setLastApiResponse] = useState<ApiResponse | null>(null);
+  const [previousKind, setPreviousKind] = useState<"question" | "answer" | null>(null);
+
+  // entries/result: будем писать result в lastApiResponse. entries все равно нужны для журнала
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [tab, setTab] = useState<"today" | "journal">("today");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // (Неиспользуемые в lite, оставлены для обратной совместимости/journal)
   const [nextStepUser, setNextStepUser] = useState("");
   const [confidence, setConfidence] = useState<number>(0);
   const [falsifier, setFalsifier] = useState("");
   const [minStep, setMinStep] = useState("");
   const [notDoing, setNotDoing] = useState("");
 
-  const [entries, setEntries] = useState<Entry[]>([]);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [tab, setTab] = useState<"today" | "journal">("today");
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  // --- ONBOARDING/STARTUP LOGIC ---
   useEffect(() => {
     const m = getStoredAppMode();
     setTrialState_(getTrialState());
@@ -561,7 +592,7 @@ export default function Home() {
     setFalsifier("");
     setMinStep("");
     setNotDoing("");
-  }, [selectedAction, result]);
+  }, [selectedAction, lastApiResponse]);
 
   const stats = getStats(entries);
 
@@ -569,11 +600,24 @@ export default function Home() {
     if (!appMode) return;
     setLoading(true);
     setError(null);
-    setResult(null);
-    try {
-      const analysis = await analyzeDecision(input, appMode, selectedAction);
-      setResult(analysis);
 
+    try {
+      // Use previousKind for request body
+      const analysis = await analyzeDecision(
+        input,
+        appMode,
+        selectedAction,
+        previousKind
+      );
+
+      // Сохраняем response в lastApiResponse
+      setLastApiResponse(analysis);
+
+      // После успешного ответа обновляем previousKind
+      if (analysis.kind === "question") setPreviousKind("question");
+      else if (analysis.kind === "answer") setPreviousKind("answer");
+
+      // В entries journal добавляем запись
       let possibleLegacyMode: Mode | undefined;
       if (appMode === "lite") {
         if (selectedAction === "stuck") possibleLegacyMode = "stuck";
@@ -585,13 +629,7 @@ export default function Home() {
         createdAt: new Date().toISOString(),
         inputText: input,
         lens: CURRENT_LENS,
-        output: {
-          essence: analysis.essence ?? "",
-          assumptions: analysis.assumptions ?? "",
-          risks: analysis.risks ?? "",
-          strategies: analysis.strategies ?? [],
-          nextStep: analysis.nextStep ?? "",
-        },
+        output: analysis,
         aligns: null,
         done: null,
         appMode,
@@ -616,10 +654,11 @@ export default function Home() {
     }
   }
 
+  // Последняя entry для journal
   const latestEntry =
     entries.length > 0 &&
-    result &&
-    entries[0]?.output?.essence === result.essence &&
+    lastApiResponse &&
+    JSON.stringify(entries[0]?.output) === JSON.stringify(lastApiResponse) &&
     entries[0]?.inputText === input
       ? entries[0]
       : null;
@@ -702,33 +741,22 @@ export default function Home() {
       `Состояние: ${modeActionStr}`,
       `Ввод: ${e.inputText}`,
       "",
-      `1) Суть:\n${e.output.essence}`,
-      "",
-      `2) Как это выглядит:\n${e.output.assumptions}`,
-      "",
-      `3) Что если так оставить:\n${e.output.risks}`,
-      "",
-      `4) Можно так:\n${e.output.strategies
-        .map((s, i) => `${i + 1}. ${s}`)
-        .join("\n")}`,
-      "",
-      `5) Можно попробовать:\n${e.output.nextStep}`,
     ];
 
-    if ((e.mode === "stuck" || (e.appMode === "lite" && e.actionKey === "stuck")) && e.nextStepUser) {
-      lines.push("", `Можно попробовать (≤30 минут): ${e.nextStepUser}`);
-    }
-    if ((e.mode === "doubt" || (e.appMode === "lite" && e.actionKey === "doubt"))) {
-      if (typeof e.confidence === "number")
-        lines.push(`Уверен (0–10): ${e.confidence}`);
-      if (e.falsifier)
-        lines.push(`Что поменяет мнение: ${e.falsifier}`);
-    }
-    if ((e.mode === "tired" || (e.appMode === "lite" && e.actionKey === "tired"))) {
-      if (e.minStep)
-        lines.push(`Минимум: ${e.minStep}`);
-      if (e.notDoing)
-        lines.push(`Сегодня не трогаю: ${e.notDoing}`);
+    if (e.output.kind === "question") {
+      lines.push(e.output.text);
+    } else if (e.output.kind === "answer") {
+      e.output.blocks.forEach((block) => {
+        if (block.title) {
+          lines.push(`${block.title}:\n${block.text}`);
+        } else {
+          lines.push(block.text);
+        }
+        lines.push(""); // blank between blocks
+      });
+      if (e.output.nextStep) {
+        lines.push(`Можно попробовать:\n${e.output.nextStep}`);
+      }
     }
 
     lines.push(
@@ -843,7 +871,11 @@ export default function Home() {
             <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
               <div className="p-4 flex flex-col items-center gap-1">
                 <span className="text-2xl">{appModeIcons["lite"]}</span>
-                <span className="text-lg font-semibold mt-1">{appModeLabels["lite"]}</span>
+                <span className="text-lg font-semibold mt-1 flex items-center gap-1">
+                  {/* Показываем иконку ☀️ слева от названия */}
+                  <span>{appModeIcons["lite"]}</span>
+                  {appModeLabels["lite"]}
+                </span>
                 <span className="text-gray-600 text-sm mt-2 whitespace-pre-line text-center">{appModeDescriptions["lite"]}</span>
                 {appModeFineDescription["lite"] && (
                   <span className="text-gray-400 text-xs mt-2">{appModeFineDescription["lite"]}</span>
@@ -877,11 +909,8 @@ export default function Home() {
                 <button
                   className="w-full px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
                   onClick={() => {
-                    // Here, should check for trial/paid. For upgrade, just hide modal and trigger agreement if allowed
                     setShowUpgrade(null);
                     setShowAgreement("guide");
-                    // setAppMode("guide");
-                    // setStoredAppMode("guide");
                   }}
                   type="button"
                 >Выбрать этот режим</button>
@@ -946,7 +975,10 @@ export default function Home() {
                 <div className="w-full flex flex-col items-center justify-between md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
                   <div className="flex flex-col items-center text-center flex-grow">
                     <span className="text-2xl">{appModeIcons["lite"]}</span>
-                    <span className="text-lg font-semibold mt-1">{appModeLabels["lite"]}</span>
+                    <span className="text-lg font-semibold mt-1 flex items-center gap-1">
+                      <span>{appModeIcons["lite"]}</span>
+                      {appModeLabels["lite"]}
+                    </span>
                     <span className="text-gray-600 text-sm mt-2 whitespace-pre-line">{appModeDescriptions["lite"]}</span>
                   </div>
                   <div className="mt-3">
@@ -1056,7 +1088,15 @@ export default function Home() {
 
   // --- UI ---
   function AppModeIndicator() {
-    let ui = appMode ? appModeLabels[appMode] : null;
+    let ui = appMode ? (
+      <span className="inline-flex items-center gap-1">
+        {appMode === "lite" && <span>{appModeIcons["lite"]}</span>}
+        {/* ☀️ для lite, остальное — просто имя */}
+        {appMode === "lite"
+          ? appModeLabels["lite"]
+          : appModeLabels[appMode]}
+      </span>
+    ) : null;
     let note: string | null = null;
     if (appMode && (appMode === "guide" || appMode === "push") && isTrialActive(appMode)) {
       note = "Неделя бесплатно";
@@ -1066,7 +1106,7 @@ export default function Home() {
     return (
       <div className="absolute right-0 top-0 mt-4 mr-4 z-20 flex items-center gap-2">
         <span className="text-xs text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
-          {`Режим: ${ui}`}{note ? ` · ${note}` : ""}
+          {`Режим: `}{ui}{note ? ` · ${note}` : ""}
         </span>
         <button
           className="text-gray-400 text-xs underline hover:text-gray-600 transition p-1"
@@ -1084,7 +1124,6 @@ export default function Home() {
   }
 
   // --- ПЕРВЫЙ ЭКРАН/ОНБОРДИНГ ВОПРОС ---
-  // Заменено на канон: "Давай посмотрим, где ты сейчас." + "Какой следующий шаг без самообмана?"
   return (
     <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4 relative">
       <AppModeIndicator />
@@ -1135,36 +1174,40 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Quick action + segmented controls */}
-            <div className="flex flex-row gap-2 mb-4 select-none">
-              {(appMode && appModeActions[appMode] ? appModeActions[appMode] : []).map((def) => (
-                <button
-                  key={def.key}
-                  type="button"
-                  className={
-                    "flex-1 px-4 py-2 rounded-lg border text-xs font-medium transition-all " +
-                    (selectedAction === def.key
-                      ? "border-black bg-black text-white shadow"
-                      : "border-gray-300 bg-gray-50 text-gray-800 hover:bg-gray-100")
-                  }
-                  onClick={() => {
-                    setSelectedAction(def.key);
-                    setResult(null);
-                    setInput("");
-                  }}
-                  disabled={loading}
-                >
-                  {def.label}
-                </button>
-              ))}
-            </div>
+            {/* Быстрые кнопки/варианты — только если НЕ push */}
+            {appMode !== "push" && (
+              <div className="flex flex-row gap-2 mb-4 select-none">
+                {(appMode && appModeActions[appMode] ? appModeActions[appMode] : []).map((def) => (
+                  <button
+                    key={def.key}
+                    type="button"
+                    className={
+                      "flex-1 px-4 py-2 rounded-lg border text-xs font-medium transition-all " +
+                      (selectedAction === def.key
+                        ? "border-black bg-black text-white shadow"
+                        : "border-gray-300 bg-gray-50 text-gray-800 hover:bg-gray-100")
+                    }
+                    onClick={() => {
+                      setSelectedAction(def.key);
+                      setLastApiResponse(null); // На смене action — сбрасываем результат
+                      setInput("");
+                    }}
+                    disabled={loading}
+                  >
+                    {def.label}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={
-                ((appMode && appModePrompt[appMode]) ? appModePrompt[appMode][selectedAction] : "") || ""
+                ((appMode && appModePrompt[appMode])
+                  ? appModePrompt[appMode][selectedAction]
+                  : "") || ""
               }
               className="w-full min-h-[140px] p-3 rounded-lg border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none resize-y mb-4"
               disabled={loading}
@@ -1188,208 +1231,87 @@ export default function Home() {
               </p>
             )}
 
-            {result && latestEntry && (
+            {/* == Каноничный рендер результата (по lastApiResponse) == */}
+            {lastApiResponse && latestEntry && (
               <div className="mt-8 pt-6 border-t border-gray-200 space-y-5">
-                <section>
-                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    1) Суть
-                  </h2>
-                  <p className="text-gray-800">{result.essence}</p>
-                </section>
-                <section>
-                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    2) Как это выглядит
-                  </h2>
-                  <p className="text-gray-800">{result.assumptions}</p>
-                </section>
-                <section>
-                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    3) Что если так оставить
-                  </h2>
-                  <p className="text-gray-800">{result.risks}</p>
-                </section>
-                <section>
-                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    4) Можно так
-                  </h2>
-                  <ul className="list-disc list-inside text-gray-800 space-y-1">
-                    {result.strategies.map((s, i) => (
-                      <li key={i}>{s}</li>
+                {/* Если answer: секции, если question — просто текст */}
+                {lastApiResponse.kind === "question" ? (
+                  <div>
+                    <div
+                      className="text-2xl font-bold text-blue-900 mb-8 whitespace-pre-line text-center"
+                      style={{ lineHeight: 1.4 }}
+                    >
+                      {lastApiResponse.text}
+                    </div>
+                    {/* Остальной UI остается (поле ответа сохраняется как есть) */}
+                  </div>
+                ) : (
+                  <div>
+                    {lastApiResponse.blocks.map((block, idx) => (
+                      <section key={idx} className="mb-5">
+                        {block.title && (
+                          <h2 className="text-base font-semibold text-gray-600 uppercase tracking-wide mb-2">
+                            {block.title}
+                          </h2>
+                        )}
+                        <div className="text-gray-800 whitespace-pre-line text-[16px]">{block.text}</div>
+                      </section>
                     ))}
-                  </ul>
-                </section>
-                <section>
-                  <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    5) Можно попробовать
-                  </h2>
-                  <p className="text-gray-800">{result.nextStep}</p>
-                </section>
+                    {/* В режиме lite скрываем шаг/nextStep (требование) */}
+                    {lastApiResponse.nextStep &&
+                      appMode !== "lite" && !!lastApiResponse.nextStep.trim() && (
+                        <section className="mb-5">
+                          <h2 className="text-base font-semibold text-blue-700 uppercase tracking-wide mb-2">
+                            Можно попробовать
+                          </h2>
+                          <div className="text-gray-800 whitespace-pre-line">{lastApiResponse.nextStep}</div>
+                        </section>
+                      )}
+                  </div>
+                )}
 
-                {/* Fixation block (relevant only in lite mode with legacy action keys) */}
-                <div className="border-t border-gray-100 pt-4 mt-4 space-y-4">
-                  {(latestEntry?.mode === "stuck" || (latestEntry?.appMode === "lite" && latestEntry?.actionKey === "stuck")) && (
-                    <div>
-                      <label className="block font-medium text-sm text-gray-700 mb-1">
-                        Можно попробовать (≤30 минут)
-                      </label>
+                {/* Блок фиксации: только если answer */}
+                {lastApiResponse.kind === "answer" && (
+                  <div className="mt-6 border-t pt-4 border-gray-100">
+                    <div className="mb-3">
+                      <span className="text-gray-600 text-sm font-medium">
+                        Это соотносится с твоим направлением?
+                      </span>
+                    </div>
+                    <div className="flex gap-2 mb-3">
+                      {alignsLabels.map((label) => (
+                        <button
+                          key={label}
+                          type="button"
+                          onClick={() => updateLatestEntry({ aligns: label })}
+                          className={`px-3 py-1 rounded-lg border text-sm font-semibold ${
+                            latestEntry.aligns === label
+                              ? "bg-black text-white border-black"
+                              : "bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
                       <input
-                        type="text"
-                        maxLength={120}
-                        className="w-full p-2 rounded-md border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none"
-                        placeholder="Если не хочется — не пиши"
-                        value={
-                          typeof latestEntry.nextStepUser === "string"
-                            ? latestEntry.nextStepUser
-                            : nextStepUser
+                        id="done-today"
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+                        checked={!!latestEntry.done}
+                        onChange={(e) =>
+                          updateLatestEntry({
+                            done: e.target.checked ? true : false,
+                          })
                         }
-                        onChange={(e) => {
-                          setNextStepUser(e.target.value);
-                          patchLatestEntry({ nextStepUser: e.target.value });
-                        }}
                       />
+                      <label htmlFor="done-today" className="text-sm text-gray-700">
+                        Что случилось
+                      </label>
                     </div>
-                  )}
-
-                  {(latestEntry?.mode === "doubt" || (latestEntry?.appMode === "lite" && latestEntry?.actionKey === "doubt")) && (
-                    <div>
-                      <div className="mb-3">
-                        <label className="block font-medium text-sm text-gray-700 mb-1">
-                          Насколько уверен
-                        </label>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="range"
-                            min={0}
-                            max={10}
-                            step={1}
-                            value={
-                              typeof latestEntry.confidence === "number"
-                                ? latestEntry.confidence
-                                : confidence
-                            }
-                            onChange={(e) => {
-                              const n = Number(e.target.value);
-                              setConfidence(n);
-                              patchLatestEntry({ confidence: n });
-                            }}
-                            className="w-full"
-                          />
-                          <div className="w-10 text-center text-xs text-gray-700">
-                            {typeof latestEntry.confidence === "number"
-                              ? latestEntry.confidence
-                              : confidence}
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block font-medium text-sm text-gray-700 mb-1">
-                          Что поменяет мнение
-                        </label>
-                        <input
-                          type="text"
-                          maxLength={150}
-                          className="w-full p-2 rounded-md border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none"
-                          placeholder="Можно не отвечать"
-                          value={
-                            typeof latestEntry.falsifier === "string"
-                              ? latestEntry.falsifier
-                              : falsifier
-                          }
-                          onChange={(e) => {
-                            setFalsifier(e.target.value);
-                            patchLatestEntry({ falsifier: e.target.value });
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {(latestEntry?.mode === "tired" || (latestEntry?.appMode === "lite" && latestEntry?.actionKey === "tired")) && (
-                    <div>
-                      <div className="mb-3">
-                        <label className="block font-medium text-sm text-gray-700 mb-1">
-                          Минимум (2–10 минут)
-                        </label>
-                        <input
-                          type="text"
-                          maxLength={70}
-                          className="w-full p-2 rounded-md border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none"
-                          placeholder="Если не хочется — не пиши"
-                          value={
-                            typeof latestEntry.minStep === "string"
-                              ? latestEntry.minStep
-                              : minStep
-                          }
-                          onChange={(e) => {
-                            setMinStep(e.target.value);
-                            patchLatestEntry({ minStep: e.target.value });
-                          }}
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-medium text-sm text-gray-700 mb-1">
-                          Сегодня не трогаю
-                        </label>
-                        <input
-                          type="text"
-                          maxLength={70}
-                          className="w-full p-2 rounded-md border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none"
-                          placeholder="Можно оставить на потом"
-                          value={
-                            typeof latestEntry.notDoing === "string"
-                              ? latestEntry.notDoing
-                              : notDoing
-                          }
-                          onChange={(e) => {
-                            setNotDoing(e.target.value);
-                            patchLatestEntry({ notDoing: e.target.value });
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Additional block for aligns and done */}
-                <div className="mt-6 border-t pt-4 border-gray-100">
-                  <div className="mb-3">
-                    <span className="text-gray-600 text-sm font-medium">
-                      Это соотносится с твоим направлением?
-                    </span>
                   </div>
-                  <div className="flex gap-2 mb-3">
-                    {alignsLabels.map((label) => (
-                      <button
-                        key={label}
-                        type="button"
-                        onClick={() => updateLatestEntry({ aligns: label })}
-                        className={`px-3 py-1 rounded-lg border text-sm font-semibold ${
-                          latestEntry.aligns === label
-                            ? "bg-black text-white border-black"
-                            : "bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200"
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      id="done-today"
-                      type="checkbox"
-                      className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
-                      checked={!!latestEntry.done}
-                      onChange={(e) =>
-                        updateLatestEntry({
-                          done: e.target.checked ? true : false,
-                        })
-                      }
-                    />
-                    <label htmlFor="done-today" className="text-sm text-gray-700">
-                      Что случилось
-                    </label>
-                  </div>
-                </div>
+                )}
               </div>
             )}
           </div>
@@ -1417,13 +1339,26 @@ export default function Home() {
                       <span className="text-xs text-gray-400">{dateLocalString(e.createdAt)}</span>
                       <span className="inline-block text-xs text-gray-500 font-medium">{e.lens}</span>
                       {e.appMode && e.actionKey && (
-                        <Badge label={`${e.appMode ? appModeLabels[e.appMode] : ""} · ${actionLabelFor(e.appMode, e.actionKey)}`} type="mode" />
+                        <Badge
+                          label={
+                            <>
+                              {e.appMode === "lite" && <span>{appModeIcons["lite"]}&nbsp;</span>}
+                              {`${e.appMode ? appModeLabels[e.appMode] : ""} · ${actionLabelFor(e.appMode, e.actionKey)}`}
+                            </>
+                          }
+                          type="mode"
+                        />
                       )}
                       {!e.appMode && e.mode && (
                         <Badge label={e.mode} type="mode" />
                       )}
                       <span className="inline-block text-gray-900 font-medium text-sm truncate max-w-[18ch] align-middle">
-                        {e.output.essence.replace(/\s*\n.*/g, "")}
+                        {/* Краткая строка для журнала */}
+                        {e.output.kind === "answer" && e.output.blocks[0]?.text
+                          ? e.output.blocks[0].text.replace(/\s*\n.*/g, "")
+                          : e.output.kind === "question"
+                          ? e.output.text.replace(/\s*\n.*/g, "")
+                          : ""}
                       </span>
                     </div>
                     <div className="flex gap-2 mt-2 sm:mt-0">
@@ -1439,71 +1374,29 @@ export default function Home() {
 
                   {expanded[e.id] && (
                     <div className="mt-4 px-2 sm:px-4">
-                      <section className="mb-3">
-                        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">
-                          1) Суть
-                        </h2>
-                        <p className="text-gray-800 whitespace-pre-line">{e.output.essence}</p>
-                      </section>
-                      <section className="mb-3">
-                        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                          2) Как это выглядит
-                        </h2>
-                        <p className="text-gray-800 whitespace-pre-line">{e.output.assumptions}</p>
-                      </section>
-                      <section className="mb-3">
-                        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                          3) Что если так оставить
-                        </h2>
-                        <p className="text-gray-800 whitespace-pre-line">{e.output.risks}</p>
-                      </section>
-                      <section className="mb-3">
-                        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                          4) Можно так
-                        </h2>
-                        <ul className="list-decimal list-inside text-gray-800 space-y-0.5">
-                          {e.output.strategies.map((s, i) => (
-                            <li key={i}>{s}</li>
+                      {e.output.kind === "question" ? (
+                        <div className="text-lg text-gray-900 font-semibold mb-4 whitespace-pre-line text-center">
+                          {e.output.text}
+                        </div>
+                      ) : (
+                        <div>
+                          {e.output.blocks.map((block, idx) => (
+                            <section key={idx} className="mb-3">
+                              {block.title && (
+                                <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">
+                                  {block.title}
+                                </h2>
+                              )}
+                              <p className="text-gray-800 whitespace-pre-line">{block.text}</p>
+                            </section>
                           ))}
-                        </ul>
-                      </section>
-                      <section className="mb-3">
-                        <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                          5) Можно попробовать
-                        </h2>
-                        <p className="text-gray-800 whitespace-pre-line">{e.output.nextStep}</p>
-                      </section>
-                      {(e.mode === "stuck" || (e.appMode === "lite" && e.actionKey === "stuck")) && e.nextStepUser && (
-                        <div className="mb-3">
-                          <h3 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">
-                            Можно попробовать (≤30 минут)
-                          </h3>
-                          <p className="text-gray-800 whitespace-pre-line">{e.nextStepUser}</p>
-                        </div>
-                      )}
-                      {(e.mode === "doubt" || (e.appMode === "lite" && e.actionKey === "doubt")) && (typeof e.confidence === "number" || e.falsifier) && (
-                        <div className="mb-3">
-                          <h3 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">
-                            Насколько уверен и что влияет
-                          </h3>
-                          {typeof e.confidence === "number" && (
-                            <div className="text-gray-800 mb-1">Уверен: {e.confidence}/10</div>
-                          )}
-                          {e.falsifier && (
-                            <div className="text-gray-800">Что поменяет мнение: {e.falsifier}</div>
-                          )}
-                        </div>
-                      )}
-                      {(e.mode === "tired" || (e.appMode === "lite" && e.actionKey === "tired")) && (e.minStep || e.notDoing) && (
-                        <div className="mb-3">
-                          <h3 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">
-                            Минимум и на потом
-                          </h3>
-                          {e.minStep && (
-                            <div className="text-gray-800">Минимум: {e.minStep}</div>
-                          )}
-                          {e.notDoing && (
-                            <div className="text-gray-800">Не трогаю: {e.notDoing}</div>
+                          {e.output.nextStep && e.appMode !== "lite" && (
+                            <section className="mb-3">
+                              <h2 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">
+                                Можно попробовать
+                              </h2>
+                              <p className="text-gray-800 whitespace-pre-line">{e.output.nextStep}</p>
+                            </section>
                           )}
                         </div>
                       )}

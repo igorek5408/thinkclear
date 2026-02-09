@@ -2,97 +2,125 @@ import { NextResponse } from "next/server";
 
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 
-// Канон Thinkclear: никакого анализа пользователя, советов, давления, приказов.
-// Если нечего сказать — нейтрально/пусто.
-
+// КАНОН THINKCLEAR (строго соблюдать):
 const BASE_CONTEXT = `
-КОНТЕКСТ (строго следовать):
-- Thinkclear — тёплое присутствие, не советчик, не анализирует пользователя и не считает себя умнее.
-- ФАКТЫ только по описанию, никаких выводов, анализа эмоций или предположений.
-- Не использовать "ты", "тебе нужно", "ты должен", "надо", "следует", "обязаны", не делать выводов о личности или эмоциях.
-- Никаких советов, кроме мягких, только если явно есть запрос.
-- Если ситуация не ясна — верни нейтральный или пустой ответ.
-- Если ввод пустой — допускается пустой/лаконичный ответ.
-- НИКОГДА не осуждай, не приписывай намерения, не выводи о прошлом/Будущем/Личности. Не сравнивай.
-- Не анализировать тревогу, не пытаться спасать.
-- Пропуск дней не комментируется вообще.
-- Чем короче и тише — тем лучше. Если не уверен, молчи.
-- В длинных вводах не сокращать и не делать обобщений.
+Thinkclear — ассистент действия. 
+Не утешает, не мотивирует и не лечит.
+Не рассуждает о чувствах, прошлом, психологических причинах и личных качествах (кроме "самообман" в push).
+Главная задача — вывести на одно конкретное действие (кроме lite).
+Разрешено обращаться на "ты" (guide/push).
+Нет обещаний, лозунгов, "стань лучше" и пр. 
+Не предлагает несколько вариантов/выбора.
+Не задаёт уточняющие вопросы, если в прошлом ответе уже был вопрос.
+Ответ строго в виде JSON из инструкции режима.
 `;
 
-const MODE_LITE_TEMPLATE = `
-Режим: Поддержка (lite).
-Формат ответа: один markdown-текст с ровно тремя секциями как ниже.
-Ответ всегда лаконичный, можно пусто или одно нейтральное предложение.
-ШАГ по умолчанию НЕ нужен — только если есть явный запрос.
-
-Секции (заголовки строго такие, даже если секция пустая):
-### 1) Я рядом
-(Максимум 1-2 коротких нейтральных предложения, можно просто "Я здесь." или пусто.)
-
-### 2) Что происходит
-(Если в вводе есть конкретика: кратко и нейтрально повторить/обозначить факт. Если нет — оставить пусто.)
-
-### 3) Один мягкий шаг на сегодня
-(ПУСТО если нет прямого/явного запроса на шаг. Никаких советов без явного запроса.)`;
-
-const MODE_GUIDE_TEMPLATE = `
-Режим: Держи курс (guide).
-Формат ответа: один markdown-текст с ровно тремя секциями как ниже.
-Рамка + критерии по факту. Один шаг ТОЛЬКО если есть явный запрос или ситуация проста.
-Никаких советов по умолчанию.
-
-Секции:
-### 1) Рамка
-(Описать суть или задачу ровно одной фразой, НЕ делать выводы, не гадать. Если неясно — оставить пусто.)
-
-### 2) Критерии выбора
-(До 2-х критериев в стиле "Можно оттолкнуться от..." – если неочевидно, оставить пусто.)
-
-### 3) Один шаг
-(Только если очевиден мягкий первый шаг, и пользователь этого хочет. Иначе — пусто.)`;
-
-const MODE_PUSH_TEMPLATE = `
-Режим: Подгоняй (push).
-Формат ответа: один markdown-текст с ровно тремя секциями как ниже.
-Решение/выбор: по факту, без давления и приказов. Обязательно только один короткий шаг и один короткий дедлайн, без оценки.
-
-Секции:
-### 1) Решение
-(Перечислить возможные действия или отметить выбор по тексту. Без советов, если неочевидно — пусто.)
-
-### 2) Дедлайн
-(Кратчайший реальный интервал: "до вечера" / "сегодня" / "в течение суток". Без угроз, давления. Если неуместно — пусто.)
-
-### 3) Один шаг
-(Один минимальный шаг, если он ясен без домысливания. Не придумывать, не гадать. Если неясно — оставить пусто.)`;
-
-const OUTPUT_RULES = `
-Ответ — только валидный JSON с одним полем: "result". Значение "result" — строка c markdown (точно указанные секции через ###). Без обёртки в \`\`\`json и дополнительного текста.
-Ошибки не исправлять — если не можешь сказать/не уверен, секция пустая или отвечает нейтрально.
-`;
-
-function getSystemPrompt(mode: "lite" | "guide" | "push"): string {
-  let template = MODE_GUIDE_TEMPLATE;
-  if (mode === "lite") template = MODE_LITE_TEMPLATE;
-  if (mode === "push") template = MODE_PUSH_TEMPLATE;
-  // Соберём системный prompt
-  return (
-    BASE_CONTEXT.trim() +
-    "\n\n" +
-    template.trim() +
-    "\n\n" +
-    OUTPUT_RULES.trim()
-  );
+const PROMPT_LITE = `
+Режим: Спокойнее (lite). 
+Главная задача — поддержать фактом, не давая шагов и советов.
+Строго без советов и шагов "что сделать". Без вопросов. Кратко.
+Формат ответа:
+{
+  "kind": "answer",
+  "blocks": [
+    { "title": "Сейчас", "text": "..." },
+    { "title": "Можно", "text": "..." },
+    { "title": "Не делай", "text": "..." }
+  ]
 }
+Любой из блоков может быть с пустым текстом, если нечего добавить. nextStep и вопросы запрещены.
+Строго JSON, без пояснений, markdown и других секций.
+`;
+
+const PROMPT_GUIDE = `
+Режим: Яснее (guide).
+Если информации недостаточно для действия — разрешен один уточняющий вопрос до 120 знаков, не более одного.
+Если в прошлом ответе уже был вопрос — вопрос сейчас запрещён, только answer.
+Ответ строго в одном из двух вариантов:
+1) Если вопрос (только если ничего не понятно, и раньше вопроса не было):
+{
+  "kind": "question",
+  "text": "..." // короткий уточняющий вопрос по делу, максимум 120 знаков
+}
+2) Если вопрос не нужен или был уже:
+{
+  "kind": "answer",
+  "blocks": [
+    { "title": "Факт", "text": "..." },
+    { "title": "Узкое место", "text": "..." },
+    { "title": "Следующий шаг (≤30 минут)", "text": "..." },
+    { "title": "Сделано, если", "text": "..." }
+  ],
+  "nextStep": "..." // дублирует "Следующий шаг" коротко, если есть шаг. Поле можно не указывать если шаг пуст.
+}
+В "Следующий шаг" — одно конкретное действие (≤30 минут), без выбора и вариантов.
+"Сделано, если" — четкий, измеримый критерий завершения.
+Блоки можно оставить пустыми, если нечего добавить.
+Строго валидный JSON, без пояснений, markdown и других секций.
+`;
+
+const PROMPT_PUSH = `
+Режим: Строже (push).
+Главная задача — максимально четко и жестко обозначить самообман и шаг.
+Без утешения, без "можно попробовать", только одно действие, без вариантов.
+Разрешён ОДИН уточняющий вопрос только если действительно неясно, к чему применить строгость. Если в прошлом ответе был вопрос — сейчас обязательно answer.
+Только два варианта ответа:
+1) Если вопрос (только если совсем непонятно, и раньше вопроса не было):
+{
+  "kind": "question",
+  "text": "..." // чёткий, конкретный вопрос (до 120 знаков)
+}
+2) Если вопрос не нужен или был уже:
+{
+  "kind": "answer",
+  "blocks": [
+    { "title": "Самообман", "text": "..." },
+    { "title": "Цена", "text": "..." },
+    { "title": "Делай сегодня (≤30 минут)", "text": "..." }
+  ],
+  "nextStep": "..." // если есть чёткий шаг (коротко), иначе не указывай
+}
+Блоки допустимо оставлять пустыми, если нечего добавить.
+Строго только JSON по формату, никаких пояснений, markdown или вариантов.
+`;
 
 type AnalyzeBody = {
   text?: string;
   input?: string;
-  mode?: "lite" | "guide" | "push";
+  mode?: "lite" | "guide" | "push" | string;
   actionLabel?: string;
   actionKey?: string;
+  appMode?: "lite" | "guide" | "push" | string;
+  previousKind?: "question" | "answer";
 };
+
+// protected from endless questioning: if previousKind is "question" — enforce answer in guide/push
+function getSystemPrompt(
+  mode: "lite" | "guide" | "push",
+  previousKind?: "question" | "answer"
+): string {
+  let restriction = "";
+  if (
+    (mode === "guide" || mode === "push") &&
+    previousKind === "question"
+  ) {
+    restriction = "\nВ предыдущем ответе уже был вопрос. Сейчас вопрос задавать запрещено. Дай answer.";
+  }
+
+  if (mode === "lite")
+    return BASE_CONTEXT.trim() + "\n\n" + PROMPT_LITE.trim();
+  if (mode === "push")
+    return BASE_CONTEXT.trim() + "\n\n" + PROMPT_PUSH.trim() + restriction;
+  // default guide
+  return BASE_CONTEXT.trim() + "\n\n" + PROMPT_GUIDE.trim() + restriction;
+}
+
+function getModeFromBody(body: any): "lite" | "guide" | "push" {
+  // Сначала из appMode, потом из mode
+  const raw = body?.appMode || body?.mode;
+  if (raw === "lite" || raw === "guide" || raw === "push") return raw;
+  return "guide";
+}
 
 export async function POST(request: Request) {
   try {
@@ -118,8 +146,6 @@ export async function POST(request: Request) {
     const input = typeof body?.input === "string" ? body.input.trim() : "";
     const content = text || input;
 
-    // Edge: Пустой ввод — разрешено и нормально
-    // Не отдаём ошибку, а просто обрабатываем на стороне prompt (система промпта знает).
     if (typeof content !== "string") {
       return NextResponse.json(
         { error: "Missing or empty input" },
@@ -127,18 +153,14 @@ export async function POST(request: Request) {
       );
     }
 
-    const mode =
-      body.mode === "lite" || body.mode === "guide" || body.mode === "push"
-        ? body.mode
-        : "guide";
-    const actionLabel =
-      typeof body.actionLabel === "string" ? body.actionLabel.trim() : "";
+    const mode = getModeFromBody(body);
+    const previousKind = body?.previousKind;
 
-    // Не передавать никаких гипотез в userMessage
-    // Просто само сообщение
     const userMessage = content;
 
-    const systemPrompt = getSystemPrompt(mode);
+    const systemPrompt = getSystemPrompt(mode, previousKind);
+
+    // // debug only: console.log('API/analyze mode', mode, 'content', content, 'previousKind', previousKind);
 
     const res = await fetch(OPENAI_API_URL, {
       method: "POST",
@@ -153,46 +175,106 @@ export async function POST(request: Request) {
           { role: "user", content: userMessage },
         ],
         response_format: { type: "json_object" },
-        temperature: 0.2, // Чуть меньше креатива, чтобы тише
+        temperature: 0.2,
       }),
     });
 
     if (!res.ok) {
       const errText = await res.text();
+      // не палим детали openai внешнему клиенту
       return NextResponse.json(
         { error: errText || `OpenAI API error: ${res.status}` },
         { status: 502 }
       );
     }
 
-    const data = await res.json();
-    const contentRaw = data?.choices?.[0]?.message?.content;
-    if (typeof contentRaw !== "string") {
-      return NextResponse.json(
-        { error: "Invalid response from OpenAI" },
-        { status: 502 }
-      );
-    }
-
-    let parsed: Record<string, unknown>;
+    let data: any;
     try {
-      parsed = JSON.parse(contentRaw);
-    } catch {
-      return NextResponse.json(
-        { error: "OpenAI returned invalid JSON" },
-        { status: 502 }
-      );
+      data = await res.json();
+    } catch (jsonErr) {
+      // не парсится вообще
+      return NextResponse.json({
+        kind: "answer",
+        blocks: [
+          { title: "Ответ", text: "Не удалось сформировать ответ. Попробуйте позже." }
+        ]
+      }, { status: 502 });
     }
 
-    const result =
-      typeof parsed.result === "string" ? parsed.result : "";
+    let responseContent = data?.choices?.[0]?.message?.content;
+    if (typeof responseContent !== "string") {
+      // иногда может сразу быть объектом (редкий случай)
+      if (typeof data?.choices?.[0]?.message?.content === "object") {
+        responseContent = JSON.stringify(data?.choices?.[0]?.message?.content);
+      } else if (data?.kind && (data?.blocks || data?.text)) {
+        // если OpenAI вернул в корне
+        responseContent = JSON.stringify(data);
+      } else {
+        return NextResponse.json({
+          kind: "answer",
+          blocks: [
+            { title: "Ответ", text: "Не удалось получить результат. Попробуйте еще раз." }
+          ]
+        }, { status: 502 });
+      }
+    }
 
-    return NextResponse.json({ result });
-  } catch (err) {
+    let parsedResult: any;
+    try {
+      parsedResult = JSON.parse(responseContent);
+    } catch {
+      // Либо часто, либо если gpt вернул мусор
+      return NextResponse.json({
+        kind: "answer",
+        blocks: [
+          { title: "Ответ", text: responseContent.length < 200 ? responseContent : "Ошибка формата. Попробуйте переформулировать." }
+        ]
+      }, { status: 200 });
+    }
+
+    // ФИНАЛЬНАЯ ВАЛИДАЦИЯ
+    if (parsedResult.kind === "question" && typeof parsedResult.text === "string") {
+      return NextResponse.json({
+        kind: "question",
+        text: parsedResult.text
+      });
+    }
+    if (
+      parsedResult.kind === "answer"
+      && Array.isArray(parsedResult.blocks)
+      && parsedResult.blocks.every(
+        (block: any) =>
+          typeof block === "object" &&
+          typeof block.title === "string" &&
+          typeof block.text === "string"
+      )
+    ) {
+      // nextStep может быть, может не быть (guide/push)
+      const resp: any = {
+        kind: "answer",
+        blocks: parsedResult.blocks
+      };
+      if (typeof parsedResult.nextStep === "string" && parsedResult.nextStep.trim()) {
+        resp.nextStep = parsedResult.nextStep.trim();
+      }
+      return NextResponse.json(resp);
+    }
+
+    // Fallback: невалидно, но хотим показать хоть что-то
+    return NextResponse.json({
+      kind: "answer",
+      blocks: [
+        { title: "Ответ", text: typeof parsedResult === 'string' ? parsedResult : "Ответ не распознан. Переформулируйте или попробуйте позже." }
+      ]
+    }, { status: 200 });
+
+  } catch (err: any) {
     console.error("[/api/analyze]", err);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      kind: "answer",
+      blocks: [
+        { title: "Ответ", text: "Внутренняя ошибка сервера. Попробуйте позднее." }
+      ]
+    }, { status: 500 });
   }
 }
