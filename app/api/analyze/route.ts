@@ -191,13 +191,13 @@ function sanitizeOpenAIResponse(parsedResult: any, mode: "lite" | "guide" | "pus
 
 // Fallback-ответ для любых аварийных ситуаций, всегда формат kind/blocks стандартный для фронта
 function fallbackAnswer(
-  text: string = "Техническая ошибка. Попробуй ещё раз.",
+  _text?: string,
   status: number = 200
 ) {
   return NextResponse.json(
     {
       kind: "answer",
-      blocks: [{ title: "Ответ", text }],
+      blocks: [{ title: "", text: "Попробуй переформулировать." }],
     },
     { status }
   );
@@ -237,14 +237,14 @@ export async function POST(request: Request) {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 500);
+      return fallbackAnswer(undefined, 500);
     }
 
     let body: AnalyzeBody;
     try {
       body = await request.json();
     } catch {
-      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 400);
+      return fallbackAnswer(undefined, 400);
     }
 
     const text = typeof body?.text === "string" ? body.text.trim() : "";
@@ -252,7 +252,7 @@ export async function POST(request: Request) {
     const content = text || input;
 
     if (typeof content !== "string" || !content) {
-      return fallbackAnswer("Пустой или некорректный ввод. Попробуй ещё раз.", 400);
+      return fallbackAnswer(undefined, 400);
     }
 
     const mode = getModeFromBody(body);
@@ -285,12 +285,12 @@ export async function POST(request: Request) {
       });
     } catch (_err) {
       // fetch сломан — OpenAI недоступен
-      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
+      return fallbackAnswer(undefined, 502);
     }
 
     if (!res.ok) {
       // Не возвращаем raw текст ошибок OpenAI, только fallback
-      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
+      return fallbackAnswer(undefined, 502);
     }
 
     let data: any;
@@ -298,7 +298,7 @@ export async function POST(request: Request) {
       data = await res.json();
     } catch {
       // OpenAI не вернул json
-      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
+      return fallbackAnswer(undefined, 502);
     }
 
     // main: получили JSON в message.content (по response_format: json_object)
@@ -311,7 +311,7 @@ export async function POST(request: Request) {
       } else if (typeof data === "string") {
         responseContent = data;
       } else {
-        return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
+        return fallbackAnswer(undefined, 502);
       }
     }
 
@@ -332,8 +332,8 @@ export async function POST(request: Request) {
     const lowerResponse = responseContent.toLocaleLowerCase("ru-RU");
     for (const word of forbidden) {
       if (lowerResponse.includes(word.replace(/\s+/g, '').toLowerCase())) {
-        // Fallback с сообщением об ошибке, но формат корректный
-        return fallbackAnswer("Ответ содержит запрещённые слова. Попробуй ещё раз.", 200);
+        // Fallback: запрещённые слова — всегда стандартный нейтральный ответ
+        return fallbackAnswer(undefined, 200);
       }
     }
 
@@ -376,18 +376,18 @@ export async function POST(request: Request) {
               { status: 200 }
             );
         }
-        // Как бы ни парсили — в случае невалидности: только корректный fallback-answer
-        return fallbackAnswer("Ответ не распознан. Попробуйте переформулировать.", 200);
+        // Как бы ни парсили — в случае невалидности: стандартный нейтральный ответ
+        return fallbackAnswer(undefined, 200);
       } catch {
         // invalid json — падать на fallback ниже
       }
     }
 
     // основной fallback путь — если ничего не распознали или ответ не JSON, возвращаем только в правильном answer-формате
-    return fallbackAnswer(responseContent.trim(), 200);
+    return fallbackAnswer(undefined, 200);
 
   } catch (err: any) {
     console.error("[/api/analyze]", err);
-    return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 500);
+    return fallbackAnswer(undefined, 500);
   }
 }

@@ -11,7 +11,7 @@ type ChatMsg = {
   kind?: "question" | "answer";
   text: string;
   ts: number;
-  appMode?: AppMode; // ВАЖНО: строго AppMode, не string/any
+  appMode?: AppMode;
 };
 
 const appModeLabels: Record<AppMode, string> = {
@@ -55,7 +55,7 @@ const PAID_MODE_KEY = "thinkclear_paid_mode";
 const PAID_CONTINUE_KEY = "thinkclear_paid_continue";
 type PaidTrialState = {
   mode: "guide" | "push";
-  started: string; // ISO date string
+  started: string;
   finished: boolean;
   continued: boolean;
 };
@@ -142,6 +142,20 @@ function isUncertain(text: string): boolean {
   if (uncertainPhrases.includes(t)) return true;
   if (t.length < 4 && ["хз", "hz"].includes(t)) return true;
   return false;
+}
+
+// --- forbidden words functionality
+const forbiddenWords = [
+  "запрещённое",
+  "forbiddenword",
+  // сюда добавьте остальные реально запрещённые слова
+];
+
+// Проверка: true, если ВСТРЕЧАЕТСЯ хотя бы одно запрещённое слово в строке (регистронезависимо, без пробелов/знаков)
+function containsForbiddenWords(str: string) {
+  if (!str || typeof str !== "string") return false;
+  const source = str.toLowerCase();
+  return forbiddenWords.some(w => source.includes(w));
 }
 
 // API response type:
@@ -243,7 +257,7 @@ export default function Home() {
   const [showModeScreen, setShowModeScreen] = useState(false);
   const [showAgreement, setShowAgreement] = useState<null | "guide" | "push">(null);
   const [showTrialOverPrompt, setShowTrialOverPrompt] = useState<null | "guide" | "push">(null);
-  const [showUpgrade, setShowUpgrade] = useState<null | "guide" | "push">(null); // Upgrade modal state
+  const [showUpgrade, setShowUpgrade] = useState<null | "guide" | "push">(null);
 
   // Пробная неделя/оплата
   const [trialState, setTrialState_] = useState<PaidTrialState | null>(null);
@@ -320,11 +334,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastAssistantKind, setLastAssistantKind] = useState<"question" | "answer" | null>(null);
-
-  // Счётчик подряд уклончивых ответов
   const [consecutiveUncertain, setConsecutiveUncertain] = useState(0);
 
-  // История для журнала — только для таба "journal", не трогаем реализацию дневника
   const [entries, setEntries] = useState<any[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [tab, setTab] = useState<"today" | "journal">("today");
@@ -357,7 +368,6 @@ export default function Home() {
     }
   }, []);
 
-  // Для подсчёта статистики по "дневнику" - отдельно
   useEffect(() => {
     if (typeof window === "undefined") return;
     const safeParseEntries = () => {
@@ -382,18 +392,26 @@ export default function Home() {
         .filter(
           (b) =>
             b &&
-            typeof b.title === "string" &&
             typeof b.text === "string" &&
             b.text.trim().length
         )
-        .map((b) => `${b.title.toUpperCase()}\n${b.text}`)
+        .map((b) =>
+          b.title && String(b.title).trim().length > 0
+            ? `${b.title}\n${b.text}`
+            : `${b.text}`
+        )
         .join("\n\n");
     } catch {
       return "";
     }
   }
 
-  // --- handle sending the message (Отправить)
+  // --- forbidden words validation for assistant's reply texts only ---
+  function violatesForbidden(texts: string[]): boolean {
+    if (!Array.isArray(texts)) return false;
+    return texts.some(str => containsForbiddenWords(str));
+  }
+
   async function handleSend() {
     if (!input.trim() || !appMode || loading) return;
     setLoading(true);
@@ -425,8 +443,7 @@ export default function Home() {
       }
       setConsecutiveUncertain(nextConsecutiveUncertain);
 
-      // 2. Формировать контекст (6-10 последних сообщений, плюс текущий ввод)
-      //    - берем последние N сообщений chat после ДОБАВЛЕНИЯ userMsg (но тут нет race, т.к. setChat async, берем осн. массив)
+      // 2. Формировать контекст
       let contextMsgs = [...chat, { ...userMsg, text: String(userMsg.text), appMode: appMode ?? undefined }];
       if (contextMsgs.length > 10) contextMsgs = contextMsgs.slice(-10);
 
@@ -441,10 +458,7 @@ export default function Home() {
           .join("\n") +
         `\n\nНовая реплика пользователя: ${String(input.trim())}`;
 
-      // 3. actionKey хардкодим как по режиму:
       const defaultAction = initialActionKey(appMode);
-
-      // 4. previousKind — то, что assistant прислал прошлым сообщением (или null):
       const kindToSend = lastAssistantKind;
 
       // 5. API вызов: добавляем consecutiveUncertain
@@ -456,31 +470,47 @@ export default function Home() {
         nextConsecutiveUncertain
       );
 
-      // 6. После ответа — добавить assistant сообщение в чат с нужным kind и содержимым (ВСЕГДА text как string)
+      // === Валидация: forbiddenWords только для text внутри ответа ассистента (НЕ title!) ===
+      let violates = false;
       if (resp.kind === "question") {
-        setChat((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            kind: "question",
-            text: String(resp.text),
-            ts: Date.now() + 1,
-            appMode: appMode ?? undefined,
-          },
-        ]);
-        setLastAssistantKind("question");
+        violates = violatesForbidden([resp.text]);
       } else if (resp.kind === "answer") {
-        setChat((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            kind: "answer",
-            text: String(blocksToText(resp.blocks)),
-            ts: Date.now() + 1,
-            appMode: appMode ?? undefined,
-          },
-        ]);
-        setLastAssistantKind("answer");
+        violates = violatesForbidden(
+          Array.isArray(resp.blocks)
+            ? resp.blocks.map((b) => (typeof b.text === "string" ? b.text : ""))
+            : []
+        );
+      }
+
+      if (violates) {
+        setError("Попробуй переформулировать.");
+        // Не добавлять никакого assistant-сообщения, не писать в чат!
+      } else {
+        if (resp.kind === "question") {
+          setChat((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              kind: "question",
+              text: String(resp.text),
+              ts: Date.now() + 1,
+              appMode: appMode ?? undefined,
+            },
+          ]);
+          setLastAssistantKind("question");
+        } else if (resp.kind === "answer") {
+          setChat((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              kind: "answer",
+              text: String(blocksToText(resp.blocks)),
+              ts: Date.now() + 1,
+              appMode: appMode ?? undefined,
+            },
+          ]);
+          setLastAssistantKind("answer");
+        }
       }
       setInput(""); // Очистить поле
     } catch (e) {
@@ -1049,7 +1079,7 @@ export default function Home() {
                         <div>
                           {e.output.blocks && e.output.blocks.map((block: any, idx: number) => (
                             <section key={idx} className="mb-3">
-                              {block.title && (
+                              {block.title && String(block.title).trim().length > 0 && (
                                 <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">
                                   {String(block.title)}
                                 </h2>
