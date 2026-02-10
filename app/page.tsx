@@ -396,9 +396,15 @@ export default function Home() {
             b.text.trim().length
         )
         .map((b) =>
-          b.title && String(b.title).trim().length > 0
-            ? `${b.title}\n${b.text}`
-            : `${b.text}`
+          (() => {
+            const rawTitle = b.title != null ? String(b.title) : "";
+            const trimmed = rawTitle.trim();
+            // Не показываем технические заголовки или пустые
+            if (!trimmed || trimmed.toLowerCase() === "ответ") {
+              return `${b.text}`;
+            }
+            return `${trimmed}\n${b.text}`;
+          })()
         )
         .join("\n\n");
     } catch {
@@ -514,7 +520,16 @@ export default function Home() {
       }
       setInput(""); // Очистить поле
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Что-то пошло не так.");
+      const msg = e instanceof Error ? e.message : "";
+      // Технические формулировки прячем за нейтральной подсказкой
+      if (
+        msg.includes("Неверный формат ответа от сервера") ||
+        msg.includes("Ответ содержит запрещенные слова")
+      ) {
+        setError("Попробуй ещё раз.");
+      } else {
+        setError("Попробуй ещё раз.");
+      }
     } finally {
       setLoading(false);
     }
@@ -1079,11 +1094,18 @@ export default function Home() {
                         <div>
                           {e.output.blocks && e.output.blocks.map((block: any, idx: number) => (
                             <section key={idx} className="mb-3">
-                              {block.title && String(block.title).trim().length > 0 && (
-                                <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">
-                                  {String(block.title)}
-                                </h2>
-                              )}
+                              {(() => {
+                                const rawTitle = block.title != null ? String(block.title) : "";
+                                const trimmed = rawTitle.trim();
+                                if (!trimmed || trimmed.toLowerCase() === "ответ") {
+                                  return null;
+                                }
+                                return (
+                                  <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">
+                                    {trimmed}
+                                  </h2>
+                                );
+                              })()}
                               <p className="text-gray-800 whitespace-pre-line">{String(block.text)}</p>
                             </section>
                           ))}
