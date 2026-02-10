@@ -127,18 +127,37 @@ function clearStoredAppMode() {
   } catch {}
 }
 
+// --- isUncertain function ---
+function isUncertain(text: string): boolean {
+  const uncertainPhrases = [
+    "не знаю",
+    "не помню",
+    "нет",
+    "не хочу",
+    "всё равно",
+    "похуй",
+    "без разницы"
+  ];
+  const t = text.trim().toLowerCase();
+  if (uncertainPhrases.includes(t)) return true;
+  if (t.length < 4 && ["хз", "hz"].includes(t)) return true;
+  return false;
+}
+
 // API response type:
 type ApiResponse =
   | { kind: "question"; text: string }
   | { kind: "answer"; blocks: { title: string; text: string }[]; nextStep?: string };
 
+// --- analyzeDecision: add consecutiveUncertain ---
 async function analyzeDecision(
   input: string,
   appMode: AppMode,
   actionKey: string,
   previousKind: "question" | "answer" | null,
+  consecutiveUncertain: number
 ): Promise<ApiResponse> {
-  const dataForBody: any = { input, appMode, actionKey };
+  const dataForBody: any = { input, appMode, actionKey, consecutiveUncertain };
   if (previousKind !== null) {
     dataForBody.previousKind = previousKind;
   }
@@ -302,6 +321,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [lastAssistantKind, setLastAssistantKind] = useState<"question" | "answer" | null>(null);
 
+  // Счётчик подряд уклончивых ответов
+  const [consecutiveUncertain, setConsecutiveUncertain] = useState(0);
+
   // История для журнала — только для таба "journal", не трогаем реализацию дневника
   const [entries, setEntries] = useState<any[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -394,6 +416,15 @@ export default function Home() {
         },
       ]);
 
+      // 2. Формируем новый счетчик уклончивых подряд:
+      let nextConsecutiveUncertain = consecutiveUncertain;
+      if (isUncertain(userMsg.text)) {
+        nextConsecutiveUncertain = consecutiveUncertain + 1;
+      } else {
+        nextConsecutiveUncertain = 0;
+      }
+      setConsecutiveUncertain(nextConsecutiveUncertain);
+
       // 2. Формировать контекст (6-10 последних сообщений, плюс текущий ввод)
       //    - берем последние N сообщений chat после ДОБАВЛЕНИЯ userMsg (но тут нет race, т.к. setChat async, берем осн. массив)
       let contextMsgs = [...chat, { ...userMsg, text: String(userMsg.text), appMode: appMode ?? undefined }];
@@ -416,12 +447,13 @@ export default function Home() {
       // 4. previousKind — то, что assistant прислал прошлым сообщением (или null):
       const kindToSend = lastAssistantKind;
 
-      // 5. API вызов
+      // 5. API вызов: добавляем consecutiveUncertain
       const resp = await analyzeDecision(
         contextStr,
         appMode,
         defaultAction,
-        kindToSend
+        kindToSend,
+        nextConsecutiveUncertain
       );
 
       // 6. После ответа — добавить assistant сообщение в чат с нужным kind и содержимым (ВСЕГДА text как string)
@@ -463,6 +495,7 @@ export default function Home() {
     setChat([]);
     setInput("");
     setLastAssistantKind(null);
+    setConsecutiveUncertain(0);
   }
 
   function toggleExpand(id: string) {
