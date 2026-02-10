@@ -1338,16 +1338,17 @@ export default function Home() {
                     <div className="flex-1 flex items-center gap-2">
                       <span className="text-xs text-gray-400">{dateLocalString(e.createdAt)}</span>
                       <span className="inline-block text-xs text-gray-500 font-medium">{e.lens}</span>
+                      {/* Fixed: Badge must get label:string, icon separate */}
                       {e.appMode && e.actionKey && (
-                        <Badge
-                          label={
-                            <>
-                              {e.appMode === "lite" && <span>{appModeIcons["lite"]}&nbsp;</span>}
-                              {`${e.appMode ? appModeLabels[e.appMode] : ""} · ${actionLabelFor(e.appMode, e.actionKey)}`}
-                            </>
-                          }
-                          type="mode"
-                        />
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          {e.appMode === "lite" && (
+                            <span>{appModeIcons["lite"]}</span>
+                          )}
+                          <Badge
+                            label={`${e.appMode ? appModeLabels[e.appMode] : ""} · ${actionLabelFor(e.appMode, e.actionKey)}`}
+                            type="mode"
+                          />
+                        </div>
                       )}
                       {!e.appMode && e.mode && (
                         <Badge label={e.mode} type="mode" />
