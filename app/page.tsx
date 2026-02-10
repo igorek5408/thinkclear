@@ -870,9 +870,8 @@ export default function Home() {
             {/* Спокойнее/FREE */}
             <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
               <div className="p-4 flex flex-col items-center gap-1">
-                <span className="text-2xl">{appModeIcons["lite"]}</span>
+                {/* Убираем дублирование ☀️: показываем только слева от названия */}
                 <span className="text-lg font-semibold mt-1 flex items-center gap-1">
-                  {/* Показываем иконку ☀️ слева от названия */}
                   <span>{appModeIcons["lite"]}</span>
                   {appModeLabels["lite"]}
                 </span>
@@ -974,7 +973,7 @@ export default function Home() {
               <div className="flex-1">
                 <div className="w-full flex flex-col items-center justify-between md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
                   <div className="flex flex-col items-center text-center flex-grow">
-                    <span className="text-2xl">{appModeIcons["lite"]}</span>
+                    {/* Убираем дублирование ☀️: отображаем ТОЛЬКО слева от названия */}
                     <span className="text-lg font-semibold mt-1 flex items-center gap-1">
                       <span>{appModeIcons["lite"]}</span>
                       {appModeLabels["lite"]}
