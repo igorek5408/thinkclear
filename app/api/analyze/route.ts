@@ -2,196 +2,91 @@ import { NextResponse } from "next/server";
 
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 
-// КАНОН THINKCLEAR (строго соблюдать, обновлённая версия):
-const BASE_CONTEXT = `
-Thinkclear — ассистент следующего шага без самообмана.
+// Новый промпт согласно инструкциям (исключает любые метки, структуры и запрещённые слова)
+const BASE_PROMPT = `
+Ты — диалоговый ассистент.
 
-Не терапия, не мотивация, не "улучшить состояние", не дыхание и не медитации.
+Запрещено выводить любые служебные слова, метки или структуру ответа.
 
-Запрещено: "пользователь", "человек", третье лицо. Запрещены пересказы типа "я дома" → "ты дома" как факт, если это не ведёт к шагу.
+Ни при каких условиях не используй и не выводи слова:
+коротко, вопрос, факт, самообман, цена, сейчас, следующий шаг, сделано если, можно, не делай.
 
-Не повторяй вопрос пользователя как ответ ("зачем?" -> "зачем?"). Не перефразируй реплики пользователя.
-
-Вещай по делу, отвечай только лично собеседнику (в guide/push можно на "ты"; в lite — возможно нейтрально).
-
-Если видно историю диалога, опирайся на "Новая реплика пользователя" и не повторяй то, что уже было сказано ассистентом.
-
-Бесконечные вопросы запрещены: если предыдущий ответ был "question", нельзя снова возвращать question (кроме lite, см. промпт).
-
-Никаких дыханий/воды/растяжек. Никакой "воды", списков, длинных вариантов-выборов. Ответ — всегда по делу.
-
-Ответ только в формате json (валидный json).
-`;
-
-const PROMPT_LITE = `
-Режим: Лёгкий (lite), "лучший друг".
-
-Отвечай доброжелательно, не допрос. Можешь задать ОДИН мягкий ВОПРОС (не про смысл жизни/мотивацию, не допрос) — но не больше одного (!!!), либо дать короткую поддержку (1–2 предложения).
-
-Формат ответа — всегда строго:
-{
-  "kind": "answer",
-  "blocks": [
-    {
-      "title": "Коротко",
-      "text": "..." // Дружественная поддержка (1–2 предложения, не копировать слова пользователя)
-    },
-    {
-      "title": "Вопрос",
-      "text": "..." // Один мягкий уточняющий вопрос (до 90 символов, не про мотивацию, не повторяющий вопрос пользователя). Если вопросы запрещены — оставить пустую строку ("").
-    }
-  ]
-}
+Пользователь должен видеть только живую человеческую речь.
 
 Правила:
-- Никогда не используй форматы "выбери: еда/уборка/чтение" или длинные варианты.
-- "Вопрос" оставь пустым (""), если previousKind == "question" или consecutiveUncertain >= 2 (то есть нельзя задавать вопрос).
-- "Коротко" — не дублирует слова пользователя, не повторяет вопрос пользователя, просто поддержи и мягко направь.
-- Не дополнять другими блоками.
-- Не обсуждать состояние ("расстроен", "устал") если это не ведёт к шагу.
+- Один ответ = одно сообщение.
+- Максимум один вопрос в ответе.
+- Запрещены списки и заголовки, не объясняй что делаешь.
+- Не повторяй слова пользователя.
+- Если пользователь отвечает «не знаю» — сужай выбор до двух вариантов.
 
-Return only valid json.
+Режимы:
+
+[Лучший друг]
+- Тёплый, спокойный, без давления.
+- Помогает прояснить состояние.
+
+[Старший брат]
+- Прямой, без агрессии.
+- Помогает выбрать направление, задаёт уточняющий вопрос.
+
+[Достигатор]
+- Жёстко и по делу, минимум слов.
+- Всегда приводит к конкретному действию.
+
+Если хоть одно запрещённое слово попадает в ответ — это ошибка.
+Всегда пиши только как живой человек, ни намёка на внутренние метки или структуру.
 `;
 
-const PROMPT_GUIDE = `
-Режим: Яснее (guide), "старший брат".
-
-Если consecutiveUncertain >= 2:
-  — НЕ ЗАДАВАТЬ ВОПРОСОВ. Только:
-  {
-    "kind": "answer",
-    "blocks": [
-      {
-        "title": "Шаг",
-        "text": "Открой заметки и выпиши 3 вещи, которые требуют решения. Выбери первую."
-      },
-      {
-        "title": "Сделано, если",
-        "text": "У тебя есть одна главная запись, которой займёшься первым."
-      }
-    ]
-  }
-Если previousKind == "question":
-  — НЕ ЗАДАВАТЬ ВОПРОСЫ. Только answer (как выше, но шаг только если объект уже есть).
-Если объект уже ясен:
-  {
-    "kind": "answer",
-    "blocks": [
-      {
-        "title": "Шаг",
-        "text": "..." // Один конкретный шаг до 30 минут для этого объекта
-      },
-      {
-        "title": "Сделано, если",
-        "text": "..." // Кратко критерий, как поймёшь что завершено
-      }
-    ]
-  }
-Если объекта ещё нет (и consecutiveUncertain < 2):
-  {
-    "kind": "question",
-    "text": "..." // Один конкретный вопрос про объект (что требует действия сейчас?), не про "мотивацию" и не повторять слова пользователя. Не про состояние ("что ты чувствуешь" запрещено).
-  }
-Запреты:
-- не давать цепочку вопросов.
-- не возвращать варианты-выборы/списки.
-- больше никаких других блоков.
-- не повторять слова/вопросы пользователя.
-
-Return only valid json.
-`;
-
-const PROMPT_PUSH = `
-Режим: Строже (push), "достигатор".
-
-Если consecutiveUncertain >= 2:
-  — Не задавай вопросов, только answer:
-  {
-    "kind": "answer",
-    "blocks": [
-      {
-        "title": "Делай",
-        "text": "Открой заметки, напиши строку 'сегодня я делаю ___', поставь таймер на 10 минут и начни."
-      },
-      {
-        "title": "Ко времени",
-        "text": "Будет выполнено, когда таймер прозвонит и у тебя есть результат по записи."
-      }
-    ]
-  }
-Если объекта ещё нет (и consecutiveUncertain < 2):
-  — можно один ЖЁСТКИЙ вопрос ВЫБОРА между максимум двумя вариантами, никаких открытых вопросов, ни одного длинного списка!
-  {
-    "kind": "question",
-    "text": "Выбери, что важнее сейчас: работа / здоровье? Ответь одним словом."
-  }
-Если объект уже есть:
-  {
-    "kind": "answer",
-    "blocks": [
-      {
-        "title": "Жёстко",
-        "text": "..." // Короче по сути, шаг на ≤30 минут, без воды (без морали, пояснений и многословия)
-      },
-      {
-        "title": "Делай",
-        "text": "..." // Одно конкретное действие по этому объекту, чётко и жёстко
-      }
-    ]
-  }
-Важно:
-- никаких дыханий, воды, удовольствия, списков или "советов".
-- не повторять слова или вопросы пользователя.
-
-Return only valid json.
-`;
-
-type AnalyzeBody = {
-  text?: string;
-  input?: string;
-  mode?: "lite" | "guide" | "push" | string;
-  actionLabel?: string;
-  actionKey?: string;
-  appMode?: "lite" | "guide" | "push" | string;
-  previousKind?: "question" | "answer";
-  consecutiveUncertain?: number;
-};
-
-// Главное: бесконечные вопросы запрещены, mode !== 'lite' и consecutiveUncertain >= 2 — answer без вопросов
-function getSystemPrompt(
+// Функция для выбора режима промпта
+function getPromptByMode(
   mode: "lite" | "guide" | "push",
   previousKind?: "question" | "answer",
   consecutiveUncertain?: number
 ): string {
-  let restriction = "";
+  let description = "";
 
-  // Жесткое ограничение после 2+ уклончивых ответов (кроме lite)
+  if (mode === "lite") {
+    description = `
+Режим: Лучший друг.
+Пиши тепло, спокойно, мягко, дружески. Не дави и не заставляй, помоги человеку понять себя, поддержи. Один мягкий вопрос допустим, но только если уместно. Не повторяй слова пользователя.
+`;
+  } else if (mode === "guide") {
+    description = `
+Режим: Старший брат.
+Пиши прямым тоном, но без нажима. Помоги человеку выбрать направление или сузить выбор — задай один уточняющий вопрос. Не повторяй слова пользователя. Не используй агрессию.
+Если дважды подряд "не знаю" — предложи два варианта выбора.
+      `;
+  } else if (mode === "push") {
+    description = `
+Режим: Достигатор.
+Пиши очень кратко, жёстко, не теряя человечности, всегда веди к простому конкретному действию, без лишних объяснений. Обращайся прямо, всегда к делу.
+Если дважды подряд "не знаю" — предложи два варианта выбора.
+`;
+  } else {
+    description = "";
+  }
+
+  // Динамические ограничения на количество вопросов
+  let restriction = "";
   if (
-    mode !== "lite" &&
     typeof consecutiveUncertain === "number" &&
     consecutiveUncertain >= 2
   ) {
-    restriction =
-      "\nПользователь 2+ раза подряд ответил уклончиво. ВОПРОСЫ ЗАПРЕЩЕНЫ. ДАЙ answer с одним конкретным микро-действием (≤10 минут) для добычи объекта.";
-  } else if (
-    (mode === "guide" || mode === "push") &&
-    previousKind === "question"
-  ) {
-    restriction =
-      "\nВ предыдущем ответе уже был вопрос. Сейчас вопрос задавать запрещено. Дай только answer строго по структуре.";
+    restriction = "Пользователь уже дважды ответил уклончиво или 'не знаю' — предложи ровно два варианта. Без дополнительных вопросов или объяснений.";
+  } else if (previousKind === "question") {
+    restriction = "В прошлом сообщении уже был вопрос, в этом просто поддержи или побуди к действию (без вопроса).";
   }
 
-  // Подключаем BASE_CONTEXT и нужный промпт
-  if (mode === "lite")
-    return BASE_CONTEXT.trim() + "\n\n" + PROMPT_LITE.trim();
-  if (mode === "push")
-    return BASE_CONTEXT.trim() + "\n\n" + PROMPT_PUSH.trim() + restriction;
-  // default guide
-  return BASE_CONTEXT.trim() + "\n\n" + PROMPT_GUIDE.trim() + restriction;
+  return (
+    BASE_PROMPT.trim() +
+    "\n\n" +
+    description.trim() +
+    (restriction ? "\n" + restriction : "")
+  );
 }
 
 function getModeFromBody(body: any): "lite" | "guide" | "push" {
-  // Сначала из appMode, потом из mode
   const raw = body?.appMode || body?.mode;
   if (raw === "lite" || raw === "guide" || raw === "push") return raw;
   return "guide";
@@ -203,6 +98,17 @@ function getMaxTokens(mode: "lite" | "guide" | "push"): number {
   if (mode === "push") return 140;
   return 120;
 }
+
+type AnalyzeBody = {
+  text?: string;
+  input?: string;
+  mode?: "lite" | "guide" | "push" | string;
+  actionLabel?: string;
+  actionKey?: string;
+  appMode?: "lite" | "guide" | "push" | string;
+  previousKind?: "question" | "answer";
+  consecutiveUncertain?: number;
+};
 
 export async function POST(request: Request) {
   try {
@@ -241,9 +147,7 @@ export async function POST(request: Request) {
 
     const userMessage = content;
 
-    const systemPrompt = getSystemPrompt(mode, previousKind, consecutiveUncertain);
-
-    // // debug only: console.log('API/analyze mode', mode, 'content', content, 'previousKind', previousKind);
+    const systemPrompt = getPromptByMode(mode, previousKind, consecutiveUncertain);
 
     const max_tokens = getMaxTokens(mode);
 
@@ -259,7 +163,7 @@ export async function POST(request: Request) {
           { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
-        response_format: { type: "json_object" },
+        response_format: { type: "text" }, // Ожидаем просто живую человеческую речь
         temperature: 0.2,
         max_tokens,
       }),
@@ -267,7 +171,6 @@ export async function POST(request: Request) {
 
     if (!res.ok) {
       const errText = await res.text();
-      // не палим детали openai внешнему клиенту
       return NextResponse.json(
         { error: errText || `OpenAI API error: ${res.status}` },
         { status: 502 }
@@ -278,89 +181,72 @@ export async function POST(request: Request) {
     try {
       data = await res.json();
     } catch (jsonErr) {
-      // не парсится вообще
       return NextResponse.json({
-        kind: "answer",
-        blocks: [
-          { title: "Ответ", text: "Не удалось сформировать ответ. Попробуйте позже." }
-        ]
+        text: "Не удалось сформировать ответ. Попробуйте позже.",
       }, { status: 502 });
     }
 
-    let responseContent = data?.choices?.[0]?.message?.content;
+    // Text-only response (без всяких структур)
+    let responseContent: string | undefined = data?.choices?.[0]?.message?.content;
+
     if (typeof responseContent !== "string") {
-      // иногда может сразу быть объектом (редкий случай)
       if (typeof data?.choices?.[0]?.message?.content === "object") {
         responseContent = JSON.stringify(data?.choices?.[0]?.message?.content);
-      } else if (data?.kind && (data?.blocks || data?.text)) {
-        // если OpenAI вернул в корне
-        responseContent = JSON.stringify(data);
+      } else if (typeof data === "string") {
+        responseContent = data;
       } else {
         return NextResponse.json({
-          kind: "answer",
-          blocks: [
-            { title: "Ответ", text: "Не удалось получить результат. Попробуйте еще раз." }
-          ]
+          text: "Не удалось получить результат. Попробуйте еще раз.",
         }, { status: 502 });
       }
     }
 
-    let parsedResult: any;
-    try {
-      parsedResult = JSON.parse(responseContent);
-    } catch {
-      // Либо часто, либо если gpt вернул мусор
-      return NextResponse.json({
-        kind: "answer",
-        blocks: [
-          { title: "Ответ", text: responseContent.length < 200 ? responseContent : "Ошибка формата. Попробуйте переформулировать." }
-        ]
-      }, { status: 200 });
-    }
+    // Проверка на запрещённые слова (case insensitive, в любом регистре, даже если слито)
+    const forbidden = [
+      "коротко",
+      "вопрос",
+      "факт",
+      "самообман",
+      "цена",
+      "сейчас",
+      "следующий шаг",
+      "сделано если",
+      "можно",
+      "не делай"
+    ];
 
-    // ФИНАЛЬНАЯ ВАЛИДАЦИЯ
-    if (parsedResult.kind === "question" && typeof parsedResult.text === "string") {
-      return NextResponse.json({
-        kind: "question",
-        text: parsedResult.text
-      });
-    }
-    if (
-      parsedResult.kind === "answer"
-      && Array.isArray(parsedResult.blocks)
-      && parsedResult.blocks.every(
-        (block: any) =>
-          typeof block === "object" &&
-          typeof block.title === "string" &&
-          typeof block.text === "string"
-      )
-    ) {
-      // nextStep может быть, может не быть (guide/push)
-      const resp: any = {
-        kind: "answer",
-        blocks: parsedResult.blocks
-      };
-      if (typeof parsedResult.nextStep === "string" && parsedResult.nextStep.trim()) {
-        resp.nextStep = parsedResult.nextStep.trim();
+    const lowerResponse = responseContent.toLocaleLowerCase("ru-RU");
+    for (const word of forbidden) {
+      if (lowerResponse.includes(word.replace(/\s+/g, '').toLowerCase())) {
+        return NextResponse.json({
+          text: "Ответ содержит запрещённые слова. Попробуйте ещё раз.",
+          error: "forbidden_words_detected"
+        }, { status: 200 });
       }
-      return NextResponse.json(resp);
     }
 
-    // Fallback: невалидно, но хотим показать хоть что-то
-    return NextResponse.json({
-      kind: "answer",
-      blocks: [
-        { title: "Ответ", text: typeof parsedResult === 'string' ? parsedResult : "Ответ не распознан. Переформулируйте или попробуйте позже." }
-      ]
-    }, { status: 200 });
+    // Удаляем структурные json, если вдруг встретился (может быть, если OpenAI продолжит отдавать json)
+    if (
+      responseContent.trim().startsWith("{") &&
+      responseContent.trim().endsWith("}")
+    ) {
+      let fallbackText = "Ответ не распознан. Попробуйте переформулировать.";
+      try {
+        const parsed = JSON.parse(responseContent.trim());
+        if (typeof parsed.text === "string") fallbackText = parsed.text;
+      } catch {
+        // ignore
+      }
+      return NextResponse.json({ text: fallbackText }, { status: 200 });
+    }
+
+    // основной путь: возвращаем просто человеческий ответ
+    return NextResponse.json({ text: responseContent.trim() }, { status: 200 });
 
   } catch (err: any) {
     console.error("[/api/analyze]", err);
     return NextResponse.json({
-      kind: "answer",
-      blocks: [
-        { title: "Ответ", text: "Внутренняя ошибка сервера. Попробуйте позднее." }
-      ]
+      text: "Внутренняя ошибка сервера. Попробуйте позднее.",
     }, { status: 500 });
   }
 }
