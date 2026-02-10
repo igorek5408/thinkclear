@@ -533,6 +533,10 @@ export default function Home() {
   const [lastApiResponse, setLastApiResponse] = useState<ApiResponse | null>(null);
   const [previousKind, setPreviousKind] = useState<"question" | "answer" | null>(null);
 
+  // Вставляем два состояния: followupInput и pendingQuestion
+  const [followupInput, setFollowupInput] = useState("");
+  const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+
   const [entries, setEntries] = useState<Entry[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [tab, setTab] = useState<"today" | "journal">("today");
@@ -587,23 +591,39 @@ export default function Home() {
 
   const stats = getStats(entries);
 
+  // Обновляем: handleAnalyze теперь учитывает pendingQuestion и followupInput
   async function handleAnalyze() {
     if (!appMode) return;
     setLoading(true);
     setError(null);
 
     try {
-      // Always use default actionKey for the mode (no interaction for user)
       const defaultAction = initialActionKey(appMode);
+
+      let usedInput = "";
+      let kindToSend: "question" | "answer" | null = null;
+
+      if (pendingQuestion !== null) {
+        // Это follow-up ответ
+        if (followupInput.trim().length === 0) {
+          setError("Пожалуйста, напиши ответ.");
+          setLoading(false);
+          return;
+        }
+        usedInput = followupInput;
+        kindToSend = "question";
+      } else {
+        usedInput = input;
+        kindToSend = previousKind;
+      }
+
       const analysis = await analyzeDecision(
-        input,
+        usedInput,
         appMode,
         defaultAction,
-        previousKind
+        pendingQuestion !== null ? "question" : kindToSend
       );
       setLastApiResponse(analysis);
-      if (analysis.kind === "question") setPreviousKind("question");
-      else if (analysis.kind === "answer") setPreviousKind("answer");
 
       let possibleLegacyMode: Mode | undefined;
       if (appMode === "lite") {
@@ -611,29 +631,44 @@ export default function Home() {
         else if (defaultAction === "doubt") possibleLegacyMode = "doubt";
         else if (defaultAction === "tired") possibleLegacyMode = "tired";
       }
-      const newEntry: Entry = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-        createdAt: new Date().toISOString(),
-        inputText: input,
-        lens: CURRENT_LENS,
-        output: analysis,
-        aligns: null,
-        done: null,
-        appMode,
-        actionKey: defaultAction,
-        mode: possibleLegacyMode,
-      };
-      let newEntries: Entry[] = [];
-      setEntries((prev) => {
-        newEntries = [newEntry, ...prev];
-        saveEntries(newEntries);
-        return newEntries;
-      });
-      setNextStepUser("");
-      setConfidence(0);
-      setFalsifier("");
-      setMinStep("");
-      setNotDoing("");
+
+      if (analysis.kind === "question") {
+        setPendingQuestion(analysis.text);
+        setPreviousKind("question");
+        setFollowupInput("");
+        // input НЕ очищать, пусть остается
+        // Журнал пишем только когда приходит answer!
+      }
+      else if (analysis.kind === "answer") {
+        setPendingQuestion(null);
+        setPreviousKind("answer");
+        setFollowupInput("");
+        // Можно очистить основной input, но необязательно (оставим как есть)
+        // Сохраняем entry в журнал только по answer!
+        const newEntry: Entry = {
+          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+          createdAt: new Date().toISOString(),
+          inputText: input,
+          lens: CURRENT_LENS,
+          output: analysis,
+          aligns: null,
+          done: null,
+          appMode,
+          actionKey: defaultAction,
+          mode: possibleLegacyMode,
+        };
+        let newEntries: Entry[] = [];
+        setEntries((prev) => {
+          newEntries = [newEntry, ...prev];
+          saveEntries(newEntries);
+          return newEntries;
+        });
+        setNextStepUser("");
+        setConfidence(0);
+        setFalsifier("");
+        setMinStep("");
+        setNotDoing("");
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Что-то пошло не так.");
     } finally {
@@ -645,6 +680,7 @@ export default function Home() {
   const latestEntry =
     entries.length > 0 &&
     lastApiResponse &&
+    (lastApiResponse.kind === "answer") &&
     JSON.stringify(entries[0]?.output) === JSON.stringify(lastApiResponse) &&
     entries[0]?.inputText === input
       ? entries[0]
@@ -1139,33 +1175,84 @@ export default function Home() {
 
             {/* УБРАНЫ КНОПКИ СОСТОЯНИЙ/ХОДОВ */}
 
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={
-                // Используем только общий плейсхолдер для читаемости (не по action)
-                appMode === "lite"
-                  ? "Что сейчас происходит?"
-                  : appMode === "guide"
-                    ? "Можно описать, где затык. Без спешки."
-                    : ""
-              }
-              className="w-full min-h-[140px] p-3 rounded-lg border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none resize-y mb-4"
-              disabled={loading}
-            />
-            <button
-              type="button"
-              onClick={handleAnalyze}
-              disabled={
-                loading ||
-                input.trim().length < 2 ||
-                !appMode
-              }
-              className="w-full py-3 rounded-lg bg-black text-white hover:bg-gray-800 transition disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {loading ? "Пишу..." : "Посмотреть"}
-            </button>
+            {/* ======== Новый UX для pendingQuestion ======= */}
+            {pendingQuestion === null ? (
+              <>
+                <label className="block text-xs text-gray-500 mb-1" htmlFor="main-input">
+                  Введи свой запрос
+                </label>
+                <textarea
+                  ref={inputRef}
+                  id="main-input"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder={
+                    // Используем только общий плейсхолдер для читаемости (не по action)
+                    appMode === "lite"
+                      ? "Что сейчас происходит?"
+                      : appMode === "guide"
+                        ? "Можно описать, где затык. Без спешки."
+                        : ""
+                  }
+                  className="w-full min-h-[140px] p-3 rounded-lg border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none resize-y mb-4"
+                  disabled={loading}
+                />
+                <button
+                  type="button"
+                  onClick={handleAnalyze}
+                  disabled={
+                    loading ||
+                    input.trim().length < 2 ||
+                    !appMode
+                  }
+                  className="w-full py-3 rounded-lg bg-black text-white hover:bg-gray-800 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {loading ? "Пишу..." : "Посмотреть"}
+                </button>
+              </>
+            ) : (
+              <>
+                <label className="block text-xs text-gray-500 mb-1" htmlFor="main-input">
+                  Твой ввод
+                </label>
+                <textarea
+                  ref={inputRef}
+                  id="main-input"
+                  value={input}
+                  readOnly
+                  tabIndex={-1}
+                  className="w-full min-h-[100px] bg-gray-50 p-3 rounded-lg border border-gray-200 opacity-90 mb-2"
+                />
+                <div
+                  className="text-2xl font-bold text-blue-900 mb-6 whitespace-pre-line text-center"
+                  style={{ lineHeight: 1.4 }}
+                >
+                  {pendingQuestion}
+                </div>
+                <textarea
+                  id="followup-input"
+                  value={followupInput}
+                  onChange={e => setFollowupInput(e.target.value)}
+                  placeholder="Ответь коротко..."
+                  className="w-full min-h-[56px] p-3 rounded-lg border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none resize-y mb-4"
+                  disabled={loading}
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={handleAnalyze}
+                  disabled={
+                    loading ||
+                    followupInput.trim().length === 0
+                  }
+                  className="w-full py-3 rounded-lg bg-black text-white hover:bg-gray-800 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {loading ? "Пишу..." : "Продолжить"}
+                </button>
+              </>
+            )}
+            {/* конец блока pendingQuestion UX */}
+
             {error && (
               <p className="mt-4 text-red-600 text-sm" role="alert">
                 {error}
@@ -1173,74 +1260,61 @@ export default function Home() {
             )}
 
             {/* === Рендер результата: только blocks/question, никаких "можно попробовать" и других секций === */}
-            {lastApiResponse && latestEntry && (
+            {lastApiResponse && latestEntry && lastApiResponse.kind === "answer" && (
               <div className="mt-8 pt-6 border-t border-gray-200 space-y-5">
-                {lastApiResponse.kind === "question" ? (
-                  <div>
-                    <div
-                      className="text-2xl font-bold text-blue-900 mb-8 whitespace-pre-line text-center"
-                      style={{ lineHeight: 1.4 }}
-                    >
-                      {lastApiResponse.text}
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    {lastApiResponse.blocks.map((block, idx) => (
-                      <section key={idx} className="mb-5">
-                        {block.title && (
-                          <h2 className="text-base font-semibold text-gray-600 uppercase tracking-wide mb-2">
-                            {block.title}
-                          </h2>
-                        )}
-                        <div className="text-gray-800 whitespace-pre-line text-[16px]">{block.text}</div>
-                      </section>
-                    ))}
-                  </div>
-                )}
+                <div>
+                  {lastApiResponse.blocks.map((block, idx) => (
+                    <section key={idx} className="mb-5">
+                      {block.title && (
+                        <h2 className="text-base font-semibold text-gray-600 uppercase tracking-wide mb-2">
+                          {block.title}
+                        </h2>
+                      )}
+                      <div className="text-gray-800 whitespace-pre-line text-[16px]">{block.text}</div>
+                    </section>
+                  ))}
+                </div>
 
                 {/* Фиксация (aligns/done) только если answer, оставим без изменений */}
-                {lastApiResponse.kind === "answer" && (
-                  <div className="mt-6 border-t pt-4 border-gray-100">
-                    <div className="mb-3">
-                      <span className="text-gray-600 text-sm font-medium">
-                        Это соотносится с твоим направлением?
-                      </span>
-                    </div>
-                    <div className="flex gap-2 mb-3">
-                      {alignsLabels.map((label) => (
-                        <button
-                          key={label}
-                          type="button"
-                          onClick={() => updateLatestEntry({ aligns: label })}
-                          className={`px-3 py-1 rounded-lg border text-sm font-semibold ${
-                            latestEntry.aligns === label
-                              ? "bg-black text-white border-black"
-                              : "bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200"
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        id="done-today"
-                        type="checkbox"
-                        className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
-                        checked={!!latestEntry.done}
-                        onChange={(e) =>
-                          updateLatestEntry({
-                            done: e.target.checked ? true : false,
-                          })
-                        }
-                      />
-                      <label htmlFor="done-today" className="text-sm text-gray-700">
-                        Что случилось
-                      </label>
-                    </div>
+                <div className="mt-6 border-t pt-4 border-gray-100">
+                  <div className="mb-3">
+                    <span className="text-gray-600 text-sm font-medium">
+                      Это соотносится с твоим направлением?
+                    </span>
                   </div>
-                )}
+                  <div className="flex gap-2 mb-3">
+                    {alignsLabels.map((label) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => updateLatestEntry({ aligns: label })}
+                        className={`px-3 py-1 rounded-lg border text-sm font-semibold ${
+                          latestEntry.aligns === label
+                            ? "bg-black text-white border-black"
+                            : "bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="done-today"
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+                      checked={!!latestEntry.done}
+                      onChange={(e) =>
+                        updateLatestEntry({
+                          done: e.target.checked ? true : false,
+                        })
+                      }
+                    />
+                    <label htmlFor="done-today" className="text-sm text-gray-700">
+                      Что случилось
+                    </label>
+                  </div>
+                </div>
               </div>
             )}
           </div>
