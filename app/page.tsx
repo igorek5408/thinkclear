@@ -10,7 +10,7 @@ type Mode = "stuck" | "doubt" | "tired";
 
 // --- App interaction modes ---
 type AppMode = "lite" | "guide" | "push";
-// NEW LABELS according to canon
+
 const appModeLabels: Record<AppMode, string> = {
   lite: "Спокойнее",
   guide: "Яснее",
@@ -36,7 +36,6 @@ const appModePrices: Record<AppMode, string | null> = {
   push: "$5",
 };
 
-// Иконки режимов + ☀️ всегда для lite
 const appModeIcons: Record<AppMode, string> = {
   lite: "☀️",
   guide: "🧭",
@@ -191,7 +190,6 @@ type Entry = {
   appMode?: AppMode;
   actionKey?: ActionKey;
   mode?: Mode;
-  // Оставляем поля для обратной совместимости с дневником:
   nextStepUser?: string;
   confidence?: number;
   falsifier?: string;
@@ -236,7 +234,6 @@ function safeParseEntries(): Entry[] {
     if (!Array.isArray(arr)) return [];
     return arr
       .map((x) => {
-        // Backward compatibility with old entries
         if (
           typeof x === "object" &&
           x &&
@@ -251,14 +248,12 @@ function safeParseEntries(): Entry[] {
           if ("kind" in x.output) {
             output = x.output;
           } else if (
-            // old shape {essence,...}
             typeof x.output.essence === "string" &&
             typeof x.output.assumptions === "string" &&
             typeof x.output.risks === "string" &&
             Array.isArray(x.output.strategies) &&
             typeof x.output.nextStep === "string"
           ) {
-            // legacy entry, convert
             let blocks: { title: string; text: string }[] = [];
             if (x.output.essence)
               blocks.push({ title: "Суть", text: x.output.essence });
@@ -271,7 +266,6 @@ function safeParseEntries(): Entry[] {
             let nextStep = x.output.nextStep ? x.output.nextStep : undefined;
             output = { kind: "answer", blocks, nextStep };
           } else {
-            // fallback
             output = { kind: "answer", blocks: [], nextStep: undefined };
           }
           const m =
@@ -391,7 +385,7 @@ function getStats(entries: Entry[]) {
   return { today: todayCount, week: daySet.size };
 }
 
-// Изменяемый analyzeDecision с previousKind
+// --- Changed: Always send default action key on analyzeDecision ---
 async function analyzeDecision(
   input: string,
   appMode: AppMode,
@@ -440,7 +434,7 @@ export default function Home() {
   const [showTrialOverPrompt, setShowTrialOverPrompt] = useState<null | "guide" | "push">(null);
   const [showUpgrade, setShowUpgrade] = useState<null | "guide" | "push">(null); // Upgrade modal state
 
-  // Определяем состояние пробной недели
+  // Пробная неделя
   const [trialState, setTrialState_] = useState<PaidTrialState | null>(null);
   useEffect(() => {
     setTrialState_(getTrialState());
@@ -497,7 +491,6 @@ export default function Home() {
     }
   }
 
-  // Trial/paid checks
   function isTrialActive(mode: "guide" | "push") {
     if (!trialState || trialState.mode !== mode) return false;
     if (trialState.finished) return false;
@@ -518,8 +511,8 @@ export default function Home() {
     return !!getPaidContinue() && getPaidContinue() === mode;
   }
 
-  // --- Multi-mode: Current "action" depends on appMode ---
-  function initialActionKey(am: AppMode | null) {
+  // --- Multi-mode: Now, set a hardcoded ActionKey for each mode; no options in interface
+  function initialActionKey(am: AppMode | null): ActionKey {
     switch (am) {
       case "lite":   return "stuck";
       case "guide":  return "blocker";
@@ -527,6 +520,7 @@ export default function Home() {
       default:       return "stuck";
     }
   }
+  // Hardcode selectedAction, but store for API schema compatibility:
   const [selectedAction, setSelectedAction] = useState<ActionKey>(initialActionKey(appMode));
   useEffect(() => {
     setSelectedAction(initialActionKey(appMode));
@@ -536,17 +530,15 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Новые состояния для сценария "question/answer"
   const [lastApiResponse, setLastApiResponse] = useState<ApiResponse | null>(null);
   const [previousKind, setPreviousKind] = useState<"question" | "answer" | null>(null);
 
-  // entries/result: будем писать result в lastApiResponse. entries все равно нужны для журнала
   const [entries, setEntries] = useState<Entry[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [tab, setTab] = useState<"today" | "journal">("today");
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // (Неиспользуемые в lite, оставлены для обратной совместимости/journal)
+  // Используется для "журнала" и фиксации (оставим, если надо)
   const [nextStepUser, setNextStepUser] = useState("");
   const [confidence, setConfidence] = useState<number>(0);
   const [falsifier, setFalsifier] = useState("");
@@ -559,7 +551,6 @@ export default function Home() {
     setShowAgreement(null);
     setShowTrialOverPrompt(null);
 
-    // guide/push: trial/upgrade logic
     if (m === "guide" || m === "push") {
       const trialCur = getTrialState();
       if (trialCur && trialCur.mode === m && trialCur.finished && !isPaidContinued(m)) {
@@ -602,27 +593,23 @@ export default function Home() {
     setError(null);
 
     try {
-      // Use previousKind for request body
+      // Always use default actionKey for the mode (no interaction for user)
+      const defaultAction = initialActionKey(appMode);
       const analysis = await analyzeDecision(
         input,
         appMode,
-        selectedAction,
+        defaultAction,
         previousKind
       );
-
-      // Сохраняем response в lastApiResponse
       setLastApiResponse(analysis);
-
-      // После успешного ответа обновляем previousKind
       if (analysis.kind === "question") setPreviousKind("question");
       else if (analysis.kind === "answer") setPreviousKind("answer");
 
-      // В entries journal добавляем запись
       let possibleLegacyMode: Mode | undefined;
       if (appMode === "lite") {
-        if (selectedAction === "stuck") possibleLegacyMode = "stuck";
-        else if (selectedAction === "doubt") possibleLegacyMode = "doubt";
-        else if (selectedAction === "tired") possibleLegacyMode = "tired";
+        if (defaultAction === "stuck") possibleLegacyMode = "stuck";
+        else if (defaultAction === "doubt") possibleLegacyMode = "doubt";
+        else if (defaultAction === "tired") possibleLegacyMode = "tired";
       }
       const newEntry: Entry = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
@@ -633,7 +620,7 @@ export default function Home() {
         aligns: null,
         done: null,
         appMode,
-        actionKey: selectedAction,
+        actionKey: defaultAction,
         mode: possibleLegacyMode,
       };
       let newEntries: Entry[] = [];
@@ -724,21 +711,10 @@ export default function Home() {
   }
 
   function composeEntryText(e: Entry) {
-    const modeActionStr = ((): string => {
-      if (e.appMode && e.actionKey) {
-        return (
-          `${e.appMode ? appModeLabels[e.appMode] : ""} · ` +
-          actionLabelFor(e.appMode!, e.actionKey)
-        );
-      }
-      if (e.mode) return e.mode;
-      return "";
-    })();
-
+    // Выводим только blocks в случае answer
     const lines = [
       `Дата: ${dateLocalString(e.createdAt)}`,
       `Линза: ${e.lens}`,
-      `Состояние: ${modeActionStr}`,
       `Ввод: ${e.inputText}`,
       "",
     ];
@@ -754,9 +730,6 @@ export default function Home() {
         }
         lines.push(""); // blank between blocks
       });
-      if (e.output.nextStep) {
-        lines.push(`Можно попробовать:\n${e.output.nextStep}`);
-      }
     }
 
     lines.push(
@@ -770,7 +743,6 @@ export default function Home() {
   }
 
   // --- ЭКРАН ДОГОВОРА (просмотра тестового доступа) ---
-  // (Not shown with new upgrade logic, but kept for trial)
   function renderAgreementScreen(mode: "guide" | "push") {
     const price = appModePrices[mode];
     return (
@@ -859,7 +831,6 @@ export default function Home() {
 
   // --- ЭКРАН АПГРЕЙДА ---
   function renderUpgradeScreen(current?: "guide" | "push" | null) {
-    // Shows all three modes. Highlight if current.
     return (
       <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4 z-50 absolute top-0 left-0 w-full h-full">
         <div className="w-full max-w-lg bg-white rounded-xl shadow-md p-6 flex flex-col gap-8 items-center">
@@ -867,10 +838,9 @@ export default function Home() {
             <h1 className="text-2xl font-bold mb-1 mt-2">Переход на другой режим</h1>
           </div>
           <div className="flex flex-col sm:flex-row gap-4 w-full">
-            {/* Спокойнее/FREE */}
+            {/* Спокойнее */}
             <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
               <div className="p-4 flex flex-col items-center gap-1">
-                {/* Убираем дублирование ☀️: показываем только слева от названия */}
                 <span className="text-lg font-semibold mt-1 flex items-center gap-1">
                   <span>{appModeIcons["lite"]}</span>
                   {appModeLabels["lite"]}
@@ -960,7 +930,6 @@ export default function Home() {
       <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
         <div className="w-full max-w-xl bg-white rounded-xl shadow-md p-6 flex flex-col gap-10 items-center">
           <div className="w-full flex flex-col items-center text-center gap-2 mb-2">
-            {/* Канонич. заголовок/подзаголовок */}
             <h1 className="text-2xl font-bold mb-1 mt-2">Какой формат тебе сейчас нужен?</h1>
             <span className="text-sm text-gray-500 mt-0.5 mb-2">
               Режим можно поменять в любой момент.
@@ -968,12 +937,10 @@ export default function Home() {
           </div>
           <div className="flex flex-col gap-4 w-full">
             {/* Карточки трех режимов */}
-            {/* Спокойнее */}
             <div className="flex flex-col sm:flex-row gap-4">
               <div className="flex-1">
                 <div className="w-full flex flex-col items-center justify-between md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
                   <div className="flex flex-col items-center text-center flex-grow">
-                    {/* Убираем дублирование ☀️: отображаем ТОЛЬКО слева от названия */}
                     <span className="text-lg font-semibold mt-1 flex items-center gap-1">
                       <span>{appModeIcons["lite"]}</span>
                       {appModeLabels["lite"]}
@@ -998,7 +965,6 @@ export default function Home() {
                 </div>
               </div>
             </div>
-            {/* Яснее */}
             <div className="flex flex-col sm:flex-row gap-4">
               <div className="flex-1">
                 <div className="w-full flex flex-col items-center md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
@@ -1012,7 +978,6 @@ export default function Home() {
                     <button
                       className="px-4 py-2 rounded-lg border border-black bg-black text-white font-semibold hover:bg-gray-900 transition"
                       onClick={() => {
-                        // Если нет trial/оплаты — апгрейд
                         const trial = getTrialState();
                         if (!trial || trial.mode !== "guide" || (!isTrialActive("guide") && !isPaidContinued("guide"))) {
                           setShowUpgrade("guide");
@@ -1032,7 +997,6 @@ export default function Home() {
                 </div>
               </div>
             </div>
-            {/* Строже */}
             <div className="flex flex-col sm:flex-row gap-4">
               <div className="flex-1">
                 <div className="w-full flex flex-col items-center md:flex-row rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition px-4 py-5">
@@ -1085,12 +1049,10 @@ export default function Home() {
     return renderModeScreen();
   }
 
-  // --- UI ---
   function AppModeIndicator() {
     let ui = appMode ? (
       <span className="inline-flex items-center gap-1">
         {appMode === "lite" && <span>{appModeIcons["lite"]}</span>}
-        {/* ☀️ для lite, остальное — просто имя */}
         {appMode === "lite"
           ? appModeLabels["lite"]
           : appModeLabels[appMode]}
@@ -1122,11 +1084,12 @@ export default function Home() {
     );
   }
 
-  // --- ПЕРВЫЙ ЭКРАН/ОНБОРДИНГ ВОПРОС ---
+  // --- UI ---
   return (
     <main className="min-h-screen flex items-center justify-center bg-gray-100 p-4 relative">
       <AppModeIndicator />
       <div className="bg-white p-0 sm:p-8 rounded-xl shadow-md w-full max-w-2xl">
+
         {/* Tabs */}
         <div className="flex border-b border-gray-200 mb-4">
           <button
@@ -1159,54 +1122,34 @@ export default function Home() {
 
         {tab === "today" && (
           <div>
-            {/* CANON ONBOARDING: */}
             <div className="mb-2 mt-2">
               <h1 className="text-2xl font-bold mb-1 text-center">Давай посмотрим, где ты сейчас.</h1>
               <p className="text-center text-base font-medium text-gray-700 mb-6">
                 Какой следующий шаг без самообмана?
               </p>
             </div>
-            {/* Warm line depends on mode (optional, can keep, but after onboarding question) */}
-            <div className="mb-3">
-              <div className="text-center text-[15px] text-teal-600 font-medium">
-                {appMode && appModeWarmLine[appMode]}
-              </div>
-            </div>
-
-            {/* Быстрые кнопки/варианты — только если НЕ push */}
+            {/* Подсказка только для lite/guide, не для push */}
             {appMode !== "push" && (
-              <div className="flex flex-row gap-2 mb-4 select-none">
-                {(appMode && appModeActions[appMode] ? appModeActions[appMode] : []).map((def) => (
-                  <button
-                    key={def.key}
-                    type="button"
-                    className={
-                      "flex-1 px-4 py-2 rounded-lg border text-xs font-medium transition-all " +
-                      (selectedAction === def.key
-                        ? "border-black bg-black text-white shadow"
-                        : "border-gray-300 bg-gray-50 text-gray-800 hover:bg-gray-100")
-                    }
-                    onClick={() => {
-                      setSelectedAction(def.key);
-                      setLastApiResponse(null); // На смене action — сбрасываем результат
-                      setInput("");
-                    }}
-                    disabled={loading}
-                  >
-                    {def.label}
-                  </button>
-                ))}
+              <div className="mb-3">
+                <div className="text-center text-[15px] text-teal-600 font-medium">
+                  {appMode && appModeWarmLine[appMode]}
+                </div>
               </div>
             )}
+
+            {/* УБРАНЫ КНОПКИ СОСТОЯНИЙ/ХОДОВ */}
 
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={
-                ((appMode && appModePrompt[appMode])
-                  ? appModePrompt[appMode][selectedAction]
-                  : "") || ""
+                // Используем только общий плейсхолдер для читаемости (не по action)
+                appMode === "lite"
+                  ? "Что сейчас происходит?"
+                  : appMode === "guide"
+                    ? "Можно описать, где затык. Без спешки."
+                    : ""
               }
               className="w-full min-h-[140px] p-3 rounded-lg border border-gray-300 focus:border-black focus:ring-1 focus:ring-black outline-none resize-y mb-4"
               disabled={loading}
@@ -1217,7 +1160,6 @@ export default function Home() {
               disabled={
                 loading ||
                 input.trim().length < 2 ||
-                !selectedAction ||
                 !appMode
               }
               className="w-full py-3 rounded-lg bg-black text-white hover:bg-gray-800 transition disabled:opacity-60 disabled:cursor-not-allowed"
@@ -1230,10 +1172,9 @@ export default function Home() {
               </p>
             )}
 
-            {/* == Каноничный рендер результата (по lastApiResponse) == */}
+            {/* === Рендер результата: только blocks/question, никаких "можно попробовать" и других секций === */}
             {lastApiResponse && latestEntry && (
               <div className="mt-8 pt-6 border-t border-gray-200 space-y-5">
-                {/* Если answer: секции, если question — просто текст */}
                 {lastApiResponse.kind === "question" ? (
                   <div>
                     <div
@@ -1242,7 +1183,6 @@ export default function Home() {
                     >
                       {lastApiResponse.text}
                     </div>
-                    {/* Остальной UI остается (поле ответа сохраняется как есть) */}
                   </div>
                 ) : (
                   <div>
@@ -1256,20 +1196,10 @@ export default function Home() {
                         <div className="text-gray-800 whitespace-pre-line text-[16px]">{block.text}</div>
                       </section>
                     ))}
-                    {/* В режиме lite скрываем шаг/nextStep (требование) */}
-                    {lastApiResponse.nextStep &&
-                      appMode !== "lite" && !!lastApiResponse.nextStep.trim() && (
-                        <section className="mb-5">
-                          <h2 className="text-base font-semibold text-blue-700 uppercase tracking-wide mb-2">
-                            Можно попробовать
-                          </h2>
-                          <div className="text-gray-800 whitespace-pre-line">{lastApiResponse.nextStep}</div>
-                        </section>
-                      )}
                   </div>
                 )}
 
-                {/* Блок фиксации: только если answer */}
+                {/* Фиксация (aligns/done) только если answer, оставим без изменений */}
                 {lastApiResponse.kind === "answer" && (
                   <div className="mt-6 border-t pt-4 border-gray-100">
                     <div className="mb-3">
@@ -1329,7 +1259,7 @@ export default function Home() {
                   key={e.id}
                   className="border-b border-gray-100 py-4 hover:bg-gray-50 transition px-2 -mx-2"
                 >
-                  {/* Compact header */}
+                  {/* Заголовок для записи */}
                   <div
                     className="flex flex-col sm:flex-row sm:items-center justify-between cursor-pointer select-none"
                     onClick={() => toggleExpand(e.id)}
@@ -1337,14 +1267,13 @@ export default function Home() {
                     <div className="flex-1 flex items-center gap-2">
                       <span className="text-xs text-gray-400">{dateLocalString(e.createdAt)}</span>
                       <span className="inline-block text-xs text-gray-500 font-medium">{e.lens}</span>
-                      {/* Fixed: Badge must get label:string, icon separate */}
                       {e.appMode && e.actionKey && (
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                           {e.appMode === "lite" && (
                             <span>{appModeIcons["lite"]}</span>
                           )}
                           <Badge
-                            label={`${e.appMode ? appModeLabels[e.appMode] : ""} · ${actionLabelFor(e.appMode, e.actionKey)}`}
+                            label={`${e.appMode ? appModeLabels[e.appMode] : ""}`}
                             type="mode"
                           />
                         </div>
@@ -1353,7 +1282,6 @@ export default function Home() {
                         <Badge label={e.mode} type="mode" />
                       )}
                       <span className="inline-block text-gray-900 font-medium text-sm truncate max-w-[18ch] align-middle">
-                        {/* Краткая строка для журнала */}
                         {e.output.kind === "answer" && e.output.blocks[0]?.text
                           ? e.output.blocks[0].text.replace(/\s*\n.*/g, "")
                           : e.output.kind === "question"
@@ -1371,7 +1299,6 @@ export default function Home() {
                       )}
                     </div>
                   </div>
-
                   {expanded[e.id] && (
                     <div className="mt-4 px-2 sm:px-4">
                       {e.output.kind === "question" ? (
@@ -1390,14 +1317,6 @@ export default function Home() {
                               <p className="text-gray-800 whitespace-pre-line">{block.text}</p>
                             </section>
                           ))}
-                          {e.output.nextStep && e.appMode !== "lite" && (
-                            <section className="mb-3">
-                              <h2 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">
-                                Можно попробовать
-                              </h2>
-                              <p className="text-gray-800 whitespace-pre-line">{e.output.nextStep}</p>
-                            </section>
-                          )}
                         </div>
                       )}
                       <div className="flex flex-wrap items-center gap-2 mt-2 mb-4 text-xs">
@@ -1423,7 +1342,6 @@ export default function Home() {
             </div>
           </div>
         )}
-
       </div>
     </main>
   );
