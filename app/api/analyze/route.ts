@@ -3,7 +3,6 @@ import { NextResponse } from "next/server";
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 
 // --- PROMPT DEFINITIONS ---
-// Все допустимые title и номера блоков по режимам:
 const MODE_BLOCKS = {
   lite: [
     "СЕЙЧАС",
@@ -23,7 +22,6 @@ const MODE_BLOCKS = {
   ],
 } as const;
 
-// Новый базовый промпт + спец-ограничения на служебные слова и структуры
 const BASE_PROMPT = `
 Ты — диалоговый ассистент.
 
@@ -103,7 +101,6 @@ function getPromptByMode(
     description = "";
   }
 
-  // Динамические ограничения на количество вопросов
   let restriction = "";
   if (
     typeof consecutiveUncertain === "number" &&
@@ -114,11 +111,13 @@ function getPromptByMode(
     restriction = "В прошлом сообщении уже был вопрос, в этом просто поддержи или побуди к действию (без вопроса).";
   }
 
+  // Добавляем явную инструкцию про json для OpenAI (см. требования)
   return (
     BASE_PROMPT.trim() +
     "\n\n" +
     description.trim() +
-    (restriction ? "\n" + restriction : "")
+    (restriction ? "\n" + restriction : "") +
+    "\nReturn ONLY valid json."
   );
 }
 
@@ -146,7 +145,6 @@ type AnalyzeBody = {
   consecutiveUncertain?: number;
 };
 
-// --- SANITIZER ВЕРСИЯ ---
 // Возвращает нормализованный ответ или текст для fallback явных ошибок структуры.
 function sanitizeOpenAIResponse(parsedResult: any, mode: "lite" | "guide" | "push") {
   // Если kind == question: оставляем только text (string, <=120)
@@ -169,11 +167,9 @@ function sanitizeOpenAIResponse(parsedResult: any, mode: "lite" | "guide" | "pus
     while (blocks.length < wanted_titles.length) {
       blocks.push({ title: wanted_titles[blocks.length], text: "" });
     }
-
-    // Удаляем любые доп. поля внутри block (оставляем только title, text)
+    // Очищаем до только title/text
     blocks = blocks.map((b) => ({ title: b.title, text: b.text }));
 
-    // nextStep
     let nextStep: string | undefined;
     if (mode === "lite") {
       nextStep = undefined;
@@ -190,102 +186,132 @@ function sanitizeOpenAIResponse(parsedResult: any, mode: "lite" | "guide" | "pus
     if (nextStep) sanitized.nextStep = nextStep;
     return sanitized;
   }
-  // Fallback: пробуем отдать text, иначе короткий fallback
-  if (typeof parsedResult?.text === "string") {
-    return { text: parsedResult.text };
+  return null;
+}
+
+// Fallback-ответ для любых аварийных ситуаций, всегда формат kind/blocks стандартный для фронта
+function fallbackAnswer(
+  text: string = "Техническая ошибка. Попробуй ещё раз.",
+  status: number = 200
+) {
+  return NextResponse.json(
+    {
+      kind: "answer",
+      blocks: [{ title: "Ответ", text }],
+    },
+    { status }
+  );
+}
+
+function fallbackQuestion(
+  text: string = "Техническая ошибка. Попробуй ещё раз.",
+  status: number = 200
+) {
+  return NextResponse.json(
+    {
+      kind: "question",
+      text,
+    },
+    { status }
+  );
+}
+
+// Валидация результата после разбора JSON
+function isValidThinkclearAnswer(obj: any, mode: "lite" | "guide" | "push"): boolean {
+  if (!obj) return false;
+  if (obj.kind === "question" && typeof obj.text === "string") return true;
+  if (obj.kind === "answer" && Array.isArray(obj.blocks)) {
+    const wanted_titles = MODE_BLOCKS[mode];
+    if (obj.blocks.length !== wanted_titles.length) return false;
+    for (let i = 0; i < wanted_titles.length; ++i) {
+      if (obj.blocks[i].title !== wanted_titles[i]) return false;
+      if (typeof obj.blocks[i].text !== "string") return false;
+    }
+    // nextStep необязательный, text необязательный
+    return true;
   }
-  return { text: "Ответ не распознан. Попробуйте переформулировать." };
+  return false;
 }
 
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      return NextResponse.json(
-        { error: "OPENAI_API_KEY is not configured" },
-        { status: 500 }
-      );
+      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 500);
     }
 
     let body: AnalyzeBody;
     try {
       body = await request.json();
     } catch {
-      return NextResponse.json(
-        { error: "Invalid JSON body" },
-        { status: 400 }
-      );
+      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 400);
     }
 
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     const input = typeof body?.input === "string" ? body.input.trim() : "";
     const content = text || input;
 
-    if (typeof content !== "string") {
-      return NextResponse.json(
-        { error: "Missing or empty input" },
-        { status: 400 }
-      );
+    if (typeof content !== "string" || !content) {
+      return fallbackAnswer("Пустой или некорректный ввод. Попробуй ещё раз.", 400);
     }
 
     const mode = getModeFromBody(body);
     const previousKind = body?.previousKind;
     const consecutiveUncertain = typeof body?.consecutiveUncertain === "number" ? body.consecutiveUncertain : undefined;
-
     const userMessage = content;
 
     const systemPrompt = getPromptByMode(mode, previousKind, consecutiveUncertain);
 
     const max_tokens = getMaxTokens(mode);
 
-    const res = await fetch(OPENAI_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userMessage },
-        ],
-        response_format: { type: "json_object" }, // Всегда только JSON!
-        temperature: 0.2,
-        max_tokens,
-      }),
-    });
+    let res;
+    try {
+      res = await fetch(OPENAI_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.2,
+          max_tokens,
+        }),
+      });
+    } catch (_err) {
+      // fetch сломан — OpenAI недоступен
+      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
+    }
 
     if (!res.ok) {
-      const errText = await res.text();
-      return NextResponse.json(
-        { error: errText || `OpenAI API error: ${res.status}` },
-        { status: 502 }
-      );
+      // Не возвращаем raw текст ошибок OpenAI, только fallback
+      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
     }
 
     let data: any;
     try {
       data = await res.json();
-    } catch (jsonErr) {
-      return NextResponse.json({
-        text: "Не удалось сформировать ответ. Попробуйте позже.",
-      }, { status: 502 });
+    } catch {
+      // OpenAI не вернул json
+      return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
     }
 
     // main: получили JSON в message.content (по response_format: json_object)
     let responseContent: string | undefined = data?.choices?.[0]?.message?.content;
 
-    // fallback: бывает payload уже как объет
+    // fallback: бывает payload уже как объект
     if (typeof responseContent !== "string") {
       if (typeof data?.choices?.[0]?.message?.content === "object") {
         responseContent = JSON.stringify(data?.choices?.[0]?.message?.content);
       } else if (typeof data === "string") {
         responseContent = data;
       } else {
-        return NextResponse.json({
-          text: "Не удалось получить результат. Попробуйте еще раз.",
-        }, { status: 502 });
+        return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 502);
       }
     }
 
@@ -303,19 +329,15 @@ export async function POST(request: Request) {
       "не делай"
     ];
 
-    // NB: здесь строка может быть JSON
     const lowerResponse = responseContent.toLocaleLowerCase("ru-RU");
     for (const word of forbidden) {
       if (lowerResponse.includes(word.replace(/\s+/g, '').toLowerCase())) {
-        return NextResponse.json({
-          text: "Ответ содержит запрещённые слова. Попробуйте ещё раз.",
-          error: "forbidden_words_detected"
-        }, { status: 200 });
+        // Fallback с сообщением об ошибке, но формат корректный
+        return fallbackAnswer("Ответ содержит запрещённые слова. Попробуй ещё раз.", 200);
       }
     }
 
-    // Попытка парсить и отдать "санитайзер"
-    let sanitizedToSend: any = undefined;
+    // Попытка парсить и вернуть строго валидную структуру
     let parsed: any;
     if (
       responseContent.trim().startsWith("{") &&
@@ -323,44 +345,49 @@ export async function POST(request: Request) {
     ) {
       try {
         parsed = JSON.parse(responseContent.trim());
-        sanitizedToSend = sanitizeOpenAIResponse(parsed, mode);
-        // дополнительная server-side очистка - удаляем мусорные ключи
-        if (sanitizedToSend && typeof sanitizedToSend === "object") {
-          // Обрезаем "text" в question, оставляем только нужные ключи
-          if (sanitizedToSend.kind === "question") {
+        // Усиленная валидация контракта
+        if (isValidThinkclearAnswer(parsed, mode)) {
+          if (parsed.kind === "question") {
+            // Возвращаем только question в своём формате
             return NextResponse.json(
-              { kind: "question", text: sanitizedToSend.text },
+              { kind: "question", text: typeof parsed.text === "string" ? parsed.text : "" },
               { status: 200 }
             );
           }
-          // answer — строго blocks (c доп. nextStep если нужно)
-          if (sanitizedToSend.kind === "answer") {
-            const responseObj: any = {
+          if (parsed.kind === "answer") {
+            const answerObj: any = {
               kind: "answer",
-              blocks: sanitizedToSend.blocks,
+              blocks: parsed.blocks,
             };
-            if (sanitizedToSend.nextStep) {
-              responseObj.nextStep = sanitizedToSend.nextStep;
-            }
-            return NextResponse.json(responseObj, { status: 200 });
+            if (parsed.nextStep) answerObj.nextStep = parsed.nextStep;
+            return NextResponse.json(answerObj, { status: 200 });
           }
         }
-        // Если не распознано, отправим text raw.
-        let fallbackText = "Ответ не распознан. Попробуйте переформулировать.";
-        if (typeof sanitizedToSend?.text === "string") fallbackText = sanitizedToSend.text;
-        return NextResponse.json({ text: fallbackText }, { status: 200 });
+        // Если невалидно — санитайзер, fallback если всё равно невалидно
+        const sanitized = sanitizeOpenAIResponse(parsed, mode);
+        if (sanitized && isValidThinkclearAnswer(sanitized, mode)) {
+          if (sanitized.kind === "question")
+            return NextResponse.json({ kind: "question", text: sanitized.text }, { status: 200 });
+          if (sanitized.kind === "answer")
+            return NextResponse.json(
+              sanitized.nextStep
+                ? { kind: "answer", blocks: sanitized.blocks, nextStep: sanitized.nextStep }
+                : { kind: "answer", blocks: sanitized.blocks },
+              { status: 200 }
+            );
+        }
+        // Как бы ни парсили — в случае невалидности: только корректный fallback-answer
+        return fallbackAnswer("Ответ не распознан. Попробуйте переформулировать.", 200);
       } catch {
-        // invalid json — падать на fallback ниже (ответ "text")
+        // invalid json — падать на fallback ниже
       }
     }
 
-    // основной fallback путь — если ничего не распознали, возвращаем только текст
-    return NextResponse.json({ text: responseContent.trim() }, { status: 200 });
+    // основной fallback путь — если ничего не распознали или ответ не JSON, возвращаем только в правильном answer-формате
+    return fallbackAnswer(responseContent.trim(), 200);
 
   } catch (err: any) {
     console.error("[/api/analyze]", err);
-    return NextResponse.json({
-      text: "Внутренняя ошибка сервера. Попробуйте позднее.",
-    }, { status: 500 });
+    return fallbackAnswer("Техническая ошибка. Попробуй ещё раз.", 500);
   }
 }
