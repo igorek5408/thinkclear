@@ -6,7 +6,12 @@ import { useState, useEffect, useRef } from "react";
 type Aligns = "Да" | "Скорее да" | "Скорее нет" | "Нет" | null;
 type Mode = "stuck" | "doubt" | "tired";
 type AppMode = "lite" | "guide" | "push";
-type ChatMsg = { role: "user" | "assistant"; kind?: "question" | "answer"; text: string; ts: number };
+type ChatMsg = {
+  role: "user" | "assistant";
+  kind?: "question" | "answer";
+  text: string;
+  ts: number;
+};
 
 const appModeLabels: Record<AppMode, string> = {
   lite: "Лучший друг",
