@@ -11,6 +11,7 @@ type ChatMsg = {
   kind?: "question" | "answer";
   text: string;
   ts: number;
+  appMode?: AppMode; // ВАЖНО: строго AppMode, не string/any
 };
 
 const appModeLabels: Record<AppMode, string> = {
@@ -351,18 +352,23 @@ export default function Home() {
     setEntries(safeParseEntries());
   }, []);
 
-  // --- chat UX: blocks к тексту
-  function blocksToText(blocks: { title: string; text: string }[]) {
-    return blocks
-      .filter((block) => (block.text && block.text.trim()) || (block.title && block.title.trim()))
-      .map((block) => {
-        if (block.title && block.text && block.text.trim()) {
-          return `${block.title.toUpperCase()}\n${block.text.trim()}`;
-        }
-        if (block.title) return block.title;
-        return block.text.trim();
-      })
-      .join("\n\n");
+  // --- chat UX: blocks к тексту (ВСЕГДА строка)
+  function blocksToText(blocks: any[]): string {
+    try {
+      if (!Array.isArray(blocks)) return "";
+      return blocks
+        .filter(
+          (b) =>
+            b &&
+            typeof b.title === "string" &&
+            typeof b.text === "string" &&
+            b.text.trim().length
+        )
+        .map((b) => `${b.title.toUpperCase()}\n${b.text}`)
+        .join("\n\n");
+    } catch {
+      return "";
+    }
   }
 
   // --- handle sending the message (Отправить)
@@ -375,14 +381,22 @@ export default function Home() {
       // 1. Добавить user сообщение в чат.
       const userMsg: ChatMsg = {
         role: "user",
-        text: input.trim(),
+        text: String(input.trim()),
         ts: Date.now(),
+        appMode: appMode ?? undefined,
       };
-      setChat((prev) => [...prev, userMsg]);
+      setChat((prev) => [
+        ...prev,
+        {
+          ...userMsg,
+          text: String(userMsg.text),
+          appMode: appMode ?? undefined,
+        },
+      ]);
 
       // 2. Формировать контекст (6-10 последних сообщений, плюс текущий ввод)
       //    - берем последние N сообщений chat после ДОБАВЛЕНИЯ userMsg (но тут нет race, т.к. setChat async, берем осн. массив)
-      let contextMsgs = [...chat, userMsg];
+      let contextMsgs = [...chat, { ...userMsg, text: String(userMsg.text), appMode: appMode ?? undefined }];
       if (contextMsgs.length > 10) contextMsgs = contextMsgs.slice(-10);
 
       const contextStr =
@@ -390,11 +404,11 @@ export default function Home() {
         contextMsgs
           .map((msg) =>
             msg.role === "user"
-              ? `Пользователь: ${msg.text}`
-              : `Ассистент: ${msg.text}`
+              ? `Пользователь: ${String(msg.text)}`
+              : `Ассистент: ${String(msg.text)}`
           )
           .join("\n") +
-        `\n\nНовая реплика пользователя: ${input.trim()}`;
+        `\n\nНовая реплика пользователя: ${String(input.trim())}`;
 
       // 3. actionKey хардкодим как по режиму:
       const defaultAction = initialActionKey(appMode);
@@ -407,19 +421,20 @@ export default function Home() {
         contextStr,
         appMode,
         defaultAction,
-        kindToSend,
+        kindToSend
       );
 
-      // 6. После ответа — добавить assistant сообщение в чат с нужным kind и содержимым
+      // 6. После ответа — добавить assistant сообщение в чат с нужным kind и содержимым (ВСЕГДА text как string)
       if (resp.kind === "question") {
         setChat((prev) => [
           ...prev,
           {
             role: "assistant",
             kind: "question",
-            text: resp.text,
+            text: String(resp.text),
             ts: Date.now() + 1,
-          }
+            appMode: appMode ?? undefined,
+          },
         ]);
         setLastAssistantKind("question");
       } else if (resp.kind === "answer") {
@@ -428,9 +443,10 @@ export default function Home() {
           {
             role: "assistant",
             kind: "answer",
-            text: blocksToText(resp.blocks),
+            text: String(blocksToText(resp.blocks)),
             ts: Date.now() + 1,
-          }
+            appMode: appMode ?? undefined,
+          },
         ]);
         setLastAssistantKind("answer");
       }
@@ -881,7 +897,7 @@ export default function Home() {
                         : {}
                     }
                   >
-                    {msg.text}
+                    {String(msg.text)}
                   </div>
                 </div>
               ))}
@@ -955,7 +971,15 @@ export default function Home() {
             )}
             {/* Журнал — старая реализация */}
             <div>
-              {entries.map((e: any) => (
+              {entries.map((e: {
+                id: string;
+                createdAt: string;
+                lens?: string;
+                appMode?: AppMode;
+                output: any;
+              }) => {
+                const mode = e.appMode;
+                return (
                 <div
                   key={e.id}
                   className="border-b border-gray-100 py-4 hover:bg-gray-50 transition px-2 -mx-2"
@@ -967,18 +991,18 @@ export default function Home() {
                     <div className="flex-1 flex items-center gap-2">
                       <span className="text-xs text-gray-400">{dateLocalString(e.createdAt)}</span>
                       <span className="inline-block text-xs text-gray-500 font-medium">{e.lens}</span>
-                      {e.appMode && (
+                      {mode && (
                         <span className="inline-flex items-center gap-1 text-xs text-blue-500">
-                          {appModeIcons[e.appMode]}
-                          {appModeLabels[e.appMode]}
+                          {mode ? appModeIcons[mode] : null}
+                          {mode ? appModeLabels[mode] : ""}
                         </span>
                       )}
                       <span className="inline-block text-gray-900 font-medium text-sm truncate max-w-[18ch] align-middle">
-                        {e.output && e.output.kind === "answer" && e.output.blocks[0]?.text
-                          ? e.output.blocks[0].text.replace(/\s*\n.*/g, "")
+                        {(e.output && e.output.kind === "answer" && e.output.blocks[0]?.text
+                          ? String(e.output.blocks[0].text).replace(/\s*\n.*/g, "")
                           : e.output && e.output.kind === "question"
-                          ? e.output.text.replace(/\s*\n.*/g, "")
-                          : ""}
+                          ? String(e.output.text).replace(/\s*\n.*/g, "")
+                          : "")}
                       </span>
                     </div>
                   </div>
@@ -986,7 +1010,7 @@ export default function Home() {
                     <div className="mt-4 px-2 sm:px-4">
                       {e.output && e.output.kind === "question" ? (
                         <div className="text-lg text-gray-900 font-semibold mb-4 whitespace-pre-line text-center">
-                          {e.output.text}
+                          {String(e.output.text)}
                         </div>
                       ) : (
                         <div>
@@ -994,10 +1018,10 @@ export default function Home() {
                             <section key={idx} className="mb-3">
                               {block.title && (
                                 <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">
-                                  {block.title}
+                                  {String(block.title)}
                                 </h2>
                               )}
-                              <p className="text-gray-800 whitespace-pre-line">{block.text}</p>
+                              <p className="text-gray-800 whitespace-pre-line">{String(block.text)}</p>
                             </section>
                           ))}
                         </div>
@@ -1005,7 +1029,7 @@ export default function Home() {
                     </div>
                   )}
                 </div>
-              ))}
+              )})}
             </div>
           </div>
         )}
