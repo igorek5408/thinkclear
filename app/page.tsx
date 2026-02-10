@@ -11,10 +11,11 @@ type Mode = "stuck" | "doubt" | "tired";
 // --- App interaction modes ---
 type AppMode = "lite" | "guide" | "push";
 
+// Новые лейблы для UI:
 const appModeLabels: Record<AppMode, string> = {
-  lite: "Спокойнее",
-  guide: "Яснее",
-  push: "Строже",
+  lite: "Лучший друг",
+  guide: "Старший брат",
+  push: "Достигатор",
 };
 
 const appModeDescriptions: Record<AppMode, string> = {
@@ -30,6 +31,7 @@ const appModeFineDescription: Record<AppMode, string | null> = {
   push: "Этот режим не щадит. Только если ты готов.",
 };
 
+// Цены и иконки не изменяются
 const appModePrices: Record<AppMode, string | null> = {
   lite: null,
   guide: "$3",
@@ -831,7 +833,7 @@ export default function Home() {
             <h1 className="text-xl font-semibold mb-1 mt-2">{appModeLabels[mode]}</h1>
             <span className="text-base text-gray-700 mt-2 mb-1">
               Мы договаривались на неделю.<br />
-              Хочешь продолжить — или вернёмся к Спокойнее?
+              Хочешь продолжить — или вернёмся к Лучшему другу?
             </span>
           </div>
           <div className="flex flex-col gap-2 w-full">
@@ -857,7 +859,7 @@ export default function Home() {
               type="button"
               autoFocus
             >
-              Вернуться к Спокойнее
+              Вернуться к Лучшему другу
             </button>
           </div>
         </div>
@@ -874,7 +876,7 @@ export default function Home() {
             <h1 className="text-2xl font-bold mb-1 mt-2">Переход на другой режим</h1>
           </div>
           <div className="flex flex-col sm:flex-row gap-4 w-full">
-            {/* Спокойнее */}
+            {/* Лучший друг */}
             <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
               <div className="p-4 flex flex-col items-center gap-1">
                 <span className="text-lg font-semibold mt-1 flex items-center gap-1">
@@ -900,7 +902,7 @@ export default function Home() {
               </div>
               <div className="text-amber-600 text-xs text-center mb-2">Бесплатно</div>
             </div>
-            {/* Яснее */}
+            {/* Старший брат */}
             <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
               <div className="p-4 flex flex-col items-center gap-1">
                 <span className="text-2xl">{appModeIcons["guide"]}</span>
@@ -922,7 +924,7 @@ export default function Home() {
               </div>
               <div className="text-amber-600 text-xs text-center mb-2">{appModePrices["guide"]}/мес</div>
             </div>
-            {/* Строже */}
+            {/* Достигатор */}
             <div className="flex flex-col flex-1 items-stretch rounded-lg border border-gray-200 bg-gray-50">
               <div className="p-4 flex flex-col items-center gap-1">
                 <span className="text-2xl">{appModeIcons["push"]}</span>
@@ -1089,9 +1091,7 @@ export default function Home() {
     let ui = appMode ? (
       <span className="inline-flex items-center gap-1">
         {appMode === "lite" && <span>{appModeIcons["lite"]}</span>}
-        {appMode === "lite"
-          ? appModeLabels["lite"]
-          : appModeLabels[appMode]}
+        {appModeLabels[appMode]}
       </span>
     ) : null;
     let note: string | null = null;
