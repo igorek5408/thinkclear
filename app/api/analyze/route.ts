@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 // --- CONTRACT TYPES & CONSTANTS ---
 
-export type Mode = "lite" | "guide" | "push";
+type AppMode = "lite" | "guide" | "push";
 
 export type Contract = {
   maxWords: number;
@@ -12,7 +12,7 @@ export type Contract = {
   empathyLevel: number; // 0..10
 };
 
-export const MODE_CONTRACTS: Record<Mode, Contract> = {
+export const MODE_CONTRACTS: Record<AppMode, Contract> = {
   lite: {
     maxWords: 150,
     maxQuestions: 1,
@@ -46,13 +46,11 @@ export type StructuredResponse = {
 
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 
-type Mode = "lite" | "guide" | "push";
-
 type AnalyzeBody = {
   text?: string;
   input?: string;
-  mode?: Mode | string;
-  appMode?: Mode | string;
+  mode?: AppMode | string;
+  appMode?: AppMode | string;
   actionKey?: string;
   actionLabel?: string;
   previousKind?: "question" | "answer";
@@ -69,13 +67,13 @@ type ApiResponseShape = {
   next: string | null;
 };
 
-function getModeFromBody(body: AnalyzeBody): Mode {
+function getModeFromBody(body: AnalyzeBody): AppMode {
   const raw = body.appMode ?? body.mode;
   if (raw === "lite" || raw === "guide" || raw === "push") return raw;
   return "guide";
 }
 
-function buildSystemPrompt(mode: Mode): string {
+function buildSystemPrompt(mode: AppMode): string {
   const base = [
     "Ты — диалоговый ассистент Thinkclear.",
     "Цель: меньше тревоги и больше ясности в следующем шаге.",
