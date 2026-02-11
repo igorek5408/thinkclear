@@ -1,5 +1,49 @@
 import { NextResponse } from "next/server";
 
+// --- CONTRACT TYPES & CONSTANTS ---
+
+export type Mode = "lite" | "guide" | "push";
+
+export type Contract = {
+  maxWords: number;
+  maxQuestions: number;
+  allowAction: boolean;
+  allowDeadline: boolean;
+  empathyLevel: number; // 0..10
+};
+
+export const MODE_CONTRACTS: Record<Mode, Contract> = {
+  lite: {
+    maxWords: 150,
+    maxQuestions: 1,
+    allowAction: false,
+    allowDeadline: false,
+    empathyLevel: 9,
+  },
+  guide: {
+    maxWords: 260,
+    maxQuestions: 1,
+    allowAction: true,
+    allowDeadline: false,
+    empathyLevel: 6,
+  },
+  push: {
+    maxWords: 200,
+    maxQuestions: 0,
+    allowAction: true,
+    allowDeadline: true,
+    empathyLevel: 2,
+  },
+};
+
+// Desired server return shape:
+export type StructuredResponse = {
+  kind: "answer" | "question";
+  blocks: { title: string; text: string }[];
+  nextStep?: string;
+};
+
+
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 
 type Mode = "lite" | "guide" | "push";
