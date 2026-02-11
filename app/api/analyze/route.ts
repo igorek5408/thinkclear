@@ -85,16 +85,15 @@ function buildSystemPrompt(mode: AppMode): string {
     '  "next": "один вопрос (если нужен) ИЛИ null"',
     "}",
     "Ключи только text и next. Никаких полей kind/blocks/ФАКТ/ВОПРОС/ОТВЕТ.",
-    "Один ответ + максимум один вопрос за ход. Если вопрос не нужен — next = null.",
     "Return ONLY valid JSON.",
   ].join("\n");
 
   if (mode === "lite") {
     const lite = [
       "Режим: Лучший друг (lite).",
-      "Тон: тёплый, поддерживающий, аккуратный. Без давления и без задач.",
-      "В поле text: 1–2 коротких предложения поддержки и спокойного отражения ситуации, без инструкций «делай/надо/должен».",
-      "В этом режиме не давай действий и задач. Можно один мягкий вопрос в next, если он реально помогает разговору. Если вопрос не нужен — next = null.",
+      "Разрешено: отражение ситуации + нормализация + 1 мягкий вопрос в next (если уместно). Длина короткая.",
+      "Запрещено: советы, планы, «сделай/попробуй/может стоит», «например», любые варианты действий.",
+      "Никаких инструкций, никаких шагов. Только теплое отражение и, при необходимости, один вопрос. Если вопрос не нужен — next = null.",
     ].join("\n");
     return `${base}\n\n${lite}`;
   }
@@ -102,21 +101,21 @@ function buildSystemPrompt(mode: AppMode): string {
   if (mode === "guide") {
     const guide = [
       "Режим: Старший брат (guide).",
-      "Обращайся на «ты» напрямую, без третьего лица.",
-      "Если ситуация неясна — в next можно задать один короткий уточняющий вопрос (до 120 символов), без перечисления вариантов.",
-      "Если ситуация уже понятна — не задавай вопрос, а в text сформулируй 1 конкретный следующий шаг (без списка вариантов). В этом случае next = null.",
-      "Никаких длинных опросников и серий из многих вопросов.",
+      "Структура: «Что вижу» → «Направление» → 1 вопрос (если неясно).",
+      "Разрешено: ровно 1 направление или 1 шаг. Без перечня альтернатив.",
+      "Запрещено: «посмотри фильм», «почитай», «просто отдохни» как универсальные заглушки. Запрещены списки вариантов.",
+      "Максимум 1 вопрос в next. Если направление ясно — next = null.",
     ].join("\n");
     return `${base}\n\n${guide}`;
   }
 
   const push = [
     "Режим: Достигатор (push).",
-    "Обращайся на «ты», говори жёстче, но без унижения и стыда. Фокус — на конкретном действии на 10–30 минут.",
-    "Если информации явно не хватает — в next можно задать один прямой вопрос, который помогает сузить фокус. Только один вопрос.",
-    "Если информации достаточно — в text опиши 1 конкретное действие на 10–30 минут, которое связано с темой пользователя. next = null.",
-    "Не предлагай бессвязные бытовые вещи вроде «убери стол» или «сделай уборку», если это не вытекает прямо из запроса.",
-    "Не давай дыхательных практик, медитаций и других универсальных техник, если пользователь о них прямо не просит.",
+    "Обязательно: 1 конкретное действие + дедлайн + требование отчёта (ответь: сделал/нет). Вопросов 0. next = null почти всегда.",
+    "Запрещено: эмпатия-успокоение («всё ок», «можно расслабиться»), уговоры («может», «попробуй»), альтернативы («или», «например», «тогда сделай другое»).",
+    "Если пользователь пишет «не хочу/не буду/не знаю»: НЕ предлагай альтернативы. Фиксируй сопротивление нейтрально и всё равно дай 1 обязательное микро-действие на 2–10 минут + требование отчёта.",
+    "text = императив (глагол в начале), дедлайн внутри, конец — «Ответь: сделал/нет.»",
+    "Никаких вопросов. Без уговоров.",
   ].join("\n");
   return `${base}\n\n${push}`;
 }
@@ -125,6 +124,110 @@ function safeFallback(message: string): ApiResponseShape {
   return {
     text: message,
     next: null,
+  };
+}
+
+// --- ENFORCEMENT: post-process text by mode ---
+
+const PUSH_FORBIDDEN = [
+  "может",
+  "попробуй",
+  "давай",
+  "хочешь",
+  "если",
+  "хорошо, тогда",
+  "например",
+  "можно",
+  "стоит",
+];
+
+const LITE_ADVICE_PATTERNS =
+  /[^.!?]*(сделай|попробуй|нужно|надо|давай|стоит|например)[^.!?]*[.!?]/gi;
+
+function enforcePush(text: string): string {
+  let t = text.trim();
+  // Remove persuasion words (whole-word match, case-insensitive)
+  for (const w of PUSH_FORBIDDEN) {
+    const re = new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
+    t = t.replace(re, "").replace(/\s+/g, " ").trim();
+  }
+  // Remove "или" alternatives — keep first part
+  const orIdx = t.search(/\sили\s/i);
+  if (orIdx > 0) t = t.slice(0, orIdx).trim();
+  // Remove 1)/2) style lists — keep content, drop list structure
+  t = t.replace(/\s*\d+\)\s*/g, " ").replace(/\s+/g, " ").trim();
+  // Split by sentences; if multiple action sentences, keep first
+  const sentences = t.match(/[^.!?]+[.!?]?/g) || [t];
+  const actionVerbs = /\b(открой|напиши|сделай|поставь|отправь|заполни|позвони|отметь|создай|зайди)\b/i;
+  let firstActionIdx = -1;
+  let secondActionIdx = -1;
+  for (let i = 0; i < sentences.length; i++) {
+    if (actionVerbs.test(sentences[i]!)) {
+      if (firstActionIdx < 0) firstActionIdx = i;
+      else if (secondActionIdx < 0) secondActionIdx = i;
+    }
+  }
+  if (secondActionIdx >= 0) {
+    t = sentences.slice(0, secondActionIdx).join(" ").trim();
+  }
+  // Ensure has deadline and report
+  const hasDeadline = /\d+\s*(минут|час|сек)/i.test(t);
+  const hasReport = /ответь.*сделал|сделал.*нет/i.test(t);
+  t = t.replace(/[.!?]+$/, "").trim();
+  if (t.length > 0) {
+    if (!hasDeadline) t += " За 5 минут.";
+    if (!hasReport) t += " Ответь: сделал/нет.";
+  }
+  return t.replace(/\s+/g, " ").trim();
+}
+
+function enforceLite(text: string): string {
+  // Remove advice sentences
+  let t = text.replace(LITE_ADVICE_PATTERNS, "").replace(/\s+/g, " ").trim();
+  if (!t || t.length < 3) {
+    return "Вижу, что тебе сейчас нелегко. Как ощущаешь себя?";
+  }
+  return t;
+}
+
+function enforceGuide(text: string): string {
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const actionRegex =
+    /\b(сделай|напиши|открой|позвони|отправь|выбери|начни|заверши)\b/i;
+  let foundFirst = false;
+  const kept: string[] = [];
+  for (const s of sentences) {
+    if (actionRegex.test(s)) {
+      if (foundFirst) continue;
+      foundFirst = true;
+    }
+    kept.push(s);
+  }
+  return kept.join(" ").replace(/\s+/g, " ").trim() || text;
+}
+
+function enforceResponse(
+  text: string,
+  next: string | null,
+  mode: AppMode
+): ApiResponseShape {
+  const contract = MODE_CONTRACTS[mode];
+  let outText = text;
+  let outNext = next;
+
+  if (mode === "push") {
+    outText = enforcePush(outText);
+    outNext = null;
+  } else if (mode === "lite" && !contract.allowAction) {
+    outText = enforceLite(outText);
+    if (outNext && contract.maxQuestions < 1) outNext = null;
+  } else if (mode === "guide") {
+    outText = enforceGuide(outText);
+  }
+
+  return {
+    text: outText || "Сбой ответа. Повтори ещё раз.",
+    next: outNext,
   };
 }
 
@@ -239,10 +342,7 @@ export async function POST(request: Request) {
         ? nextRaw.trim()
         : null;
 
-    const result: ApiResponseShape = {
-      text: textOut || "Сбой ответа. Повтори ещё раз.",
-      next: nextOut,
-    };
+    const result = enforceResponse(textOut, nextOut, mode);
 
     return NextResponse.json(result, { status: 200 });
   } catch (err) {
