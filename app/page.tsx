@@ -144,24 +144,11 @@ function isUncertain(text: string): boolean {
   return false;
 }
 
-// --- forbidden words functionality
-const forbiddenWords = [
-  "запрещённое",
-  "forbiddenword",
-  // сюда добавьте остальные реально запрещённые слова
-];
-
-// Проверка: true, если ВСТРЕЧАЕТСЯ хотя бы одно запрещённое слово в строке (регистронезависимо, без пробелов/знаков)
-function containsForbiddenWords(str: string) {
-  if (!str || typeof str !== "string") return false;
-  const source = str.toLowerCase();
-  return forbiddenWords.some(w => source.includes(w));
-}
-
 // API response type:
-type ApiResponse =
-  | { kind: "question"; text: string }
-  | { kind: "answer"; blocks: { title: string; text: string }[]; nextStep?: string };
+type ApiResponse = {
+  text: string;
+  next: string | null;
+};
 
 // --- analyzeDecision: add consecutiveUncertain ---
 async function analyzeDecision(
@@ -185,21 +172,18 @@ async function analyzeDecision(
     const message = await res.text();
     throw new Error(message || `Ошибка ${res.status}`);
   }
-  const data = await res.json();
-  if (data.kind === "question") {
-    return { kind: "question", text: data.text ?? "" };
+  const data = (await res.json()) as Partial<ApiResponse>;
+  if (!data || typeof data.text !== "string") {
+    throw new Error("Сбой ответа. Повтори ещё раз.");
   }
-  if (data.kind === "answer" && Array.isArray(data.blocks)) {
-    return {
-      kind: "answer",
-      blocks: data.blocks.map((block: any) => ({
-        title: block.title ?? "",
-        text: block.text ?? "",
-      })),
-      nextStep: data.nextStep ?? undefined,
-    };
-  }
-  throw new Error("Неверный формат ответа от сервера.");
+  const nextValue =
+    typeof data.next === "string" && data.next.trim().length > 0
+      ? data.next.trim()
+      : null;
+  return {
+    text: data.text.trim(),
+    next: nextValue,
+  };
 }
 
 function todayISO() {
@@ -412,11 +396,7 @@ export default function Home() {
     }
   }
 
-  // --- forbidden words validation for assistant's reply texts only ---
-  function violatesForbidden(texts: string[]): boolean {
-    if (!Array.isArray(texts)) return false;
-    return texts.some(str => containsForbiddenWords(str));
-  }
+  const [lastChatMode, setLastChatMode] = useState<AppMode | null>(null);
 
   async function handleSend() {
     if (!input.trim() || !appMode || loading) return;
@@ -431,14 +411,24 @@ export default function Home() {
         ts: Date.now(),
         appMode: appMode ?? undefined,
       };
-      setChat((prev) => [
-        ...prev,
-        {
+      setChat((prev) => {
+        const updated = [...prev];
+        if (appMode && lastChatMode && appMode !== lastChatMode) {
+          updated.push({
+            role: "assistant",
+            kind: "answer",
+            text: `Режим: ${appModeLabels[appMode]}`,
+            ts: Date.now(),
+            appMode,
+          });
+        }
+        updated.push({
           ...userMsg,
           text: String(userMsg.text),
           appMode: appMode ?? undefined,
-        },
-      ]);
+        });
+        return updated;
+      });
 
       // 2. Формируем новый счетчик уклончивых подряд:
       let nextConsecutiveUncertain = consecutiveUncertain;
@@ -475,61 +465,45 @@ export default function Home() {
         kindToSend,
         nextConsecutiveUncertain
       );
-
-      // === Валидация: forbiddenWords только для text внутри ответа ассистента (НЕ title!) ===
-      let violates = false;
-      if (resp.kind === "question") {
-        violates = violatesForbidden([resp.text]);
-      } else if (resp.kind === "answer") {
-        violates = violatesForbidden(
-          Array.isArray(resp.blocks)
-            ? resp.blocks.map((b) => (typeof b.text === "string" ? b.text : ""))
-            : []
-        );
-      }
-
-      if (violates) {
-        setError("Попробуй переформулировать.");
-        // Не добавлять никакого assistant-сообщения, не писать в чат!
-      } else {
-        if (resp.kind === "question") {
-          setChat((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              kind: "question",
-              text: String(resp.text),
-              ts: Date.now() + 1,
-              appMode: appMode ?? undefined,
-            },
-          ]);
+      setChat((prev) => {
+        const updated = [...prev];
+        updated.push({
+          role: "assistant",
+          kind: "answer",
+          text: String(resp.text),
+          ts: Date.now() + 1,
+          appMode: appMode ?? undefined,
+        });
+        if (resp.next) {
+          updated.push({
+            role: "assistant",
+            kind: "question",
+            text: String(resp.next),
+            ts: Date.now() + 2,
+            appMode: appMode ?? undefined,
+          });
           setLastAssistantKind("question");
-        } else if (resp.kind === "answer") {
-          setChat((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              kind: "answer",
-              text: String(blocksToText(resp.blocks)),
-              ts: Date.now() + 1,
-              appMode: appMode ?? undefined,
-            },
-          ]);
+        } else {
           setLastAssistantKind("answer");
         }
-      }
+        return updated;
+      });
+      setLastChatMode(appMode);
       setInput(""); // Очистить поле
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "";
-      // Технические формулировки прячем за нейтральной подсказкой
-      if (
-        msg.includes("Неверный формат ответа от сервера") ||
-        msg.includes("Ответ содержит запрещенные слова")
-      ) {
-        setError("Попробуй ещё раз.");
-      } else {
-        setError("Попробуй ещё раз.");
-      }
+      // На любую ошибку показываем один мягкий ответ ассистента
+      setChat((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          kind: "answer",
+          text: "Сбой ответа. Повтори ещё раз.",
+          ts: Date.now() + 1,
+          appMode: appMode ?? undefined,
+        },
+      ]);
+      setLastAssistantKind("answer");
+      setError(null);
     } finally {
       setLoading(false);
     }
